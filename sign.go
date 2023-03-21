@@ -8,7 +8,8 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
-	logger "github.com/charmbracelet/log"
+
+	"github.com/charmbracelet/log"
 	"gopkg.in/errgo.v2/errors"
 )
 
@@ -56,19 +57,19 @@ func AesDecryptECB(encrypted, key []byte) (decrypted []byte) {
 	defer func() {
 		if err := recover(); err != nil {
 			decrypted = nil
-			logger.Errorf("AesDecryptECB[%s] panic: %+v", encrypted, err)
+			log.Errorf("AesDecryptECB[%s] panic: %+v", encrypted, err)
 		}
 	}()
 
 	key, err := AesSha1Prng(key, 128)
 	if err != nil {
-		logger.Errorf("Encrypted: %s, Key: %s, AesSha1Prng error: %+v", encrypted, key, err)
+		log.Errorf("Encrypted: %s, Key: %s, AesSha1Prng error: %+v", encrypted, key, err)
 		return nil
 	}
 
 	cipher, err := aes.NewCipher(generateKey(key))
 	if err != nil {
-		logger.Errorf("Encrypted: %s, Key: %s, NewCipher error: %+v", encrypted, key, err)
+		log.Errorf("Encrypted: %s, Key: %s, NewCipher error: %+v", encrypted, key, err)
 		return nil
 	}
 

@@ -5,7 +5,7 @@ import (
 	"io"
 	"testing"
 
-	logger "github.com/charmbracelet/log"
+	"github.com/charmbracelet/log"
 )
 
 type Receiver struct{}
@@ -13,10 +13,10 @@ type Receiver struct{}
 func (r *Receiver) OnReceive(frame *Frame) {
 	bs, err := io.ReadAll(frame.Reader)
 	if err != nil {
-		logger.Error("读取消息失败!", "err", err)
+		log.Error("读取消息失败!", "err", err)
 		return
 	}
-	logger.Infof("收到消息: %s", bs)
+	log.Infof("收到消息: %s", bs)
 }
 
 type Message struct {
@@ -29,7 +29,7 @@ func TestConn(t *testing.T) {
 	client := NewClient(ctx, "ws://121.40.165.18:8800", &Receiver{}, WithPing(NewStringMessage("ping")))
 	err := client.Connect()
 	if err != nil {
-		logger.Fatal(err)
+		log.Fatal(err)
 	}
 
 	client.Subscribe(&Message{

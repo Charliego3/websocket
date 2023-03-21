@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	logger "github.com/charmbracelet/log"
+	"github.com/charmbracelet/log"
 	"github.com/gorilla/websocket"
 	json "github.com/json-iterator/go"
 	"go.uber.org/atomic"
@@ -29,23 +29,26 @@ type Option interface {
 type dialTimeout time.Duration
 type pingPeriod time.Duration
 type ping struct{ IMessage }
-type log struct{ l *logger.Logger }
+type logger struct{ l *log.Logger }
 type onConnected func(client *Client)
 type prefix string
+type logOpts struct{ *log.Options }
 
 func (ww dialTimeout) Apply(wc *Client) { wc.timeout = time.Duration(ww) }
 func (wp pingPeriod) Apply(wc *Client)  { wc.pingPeriod = time.Duration(wp) }
 func (p ping) Apply(wc *Client)         { wc.ping = p.IMessage }
-func (p log) Apply(wc *Client)          { wc.logger = p.l }
+func (p logger) Apply(wc *Client)       { wc.log = p.l }
+func (o logOpts) Apply(wc *Client)      { wc.logOpts = o.Options }
 func (h onConnected) Apply(wc *Client)  { wc.onConnected = h }
 func (h prefix) Apply(wc *Client)       { wc.prefix = string(h) }
 
-func WithDialTimeout(wt time.Duration) Option { return dialTimeout(wt) }
-func WithPingPeriod(wp time.Duration) Option  { return pingPeriod(wp) }
-func WithPing(p IMessage) Option              { return ping{p} }
-func WithLogger(l *logger.Logger) Option      { return log{l} }
-func WithOnConnected(h func(*Client)) Option  { return onConnected(h) }
-func WithPrefix(p string) Option              { return prefix(p) }
+func WithDialTimeout(wt time.Duration) Option    { return dialTimeout(wt) }
+func WithPingPeriod(wp time.Duration) Option     { return pingPeriod(wp) }
+func WithPing(p IMessage) Option                 { return ping{p} }
+func WithLogger(l *log.Logger) Option            { return logger{l} }
+func WithLoggerOptions(opts *log.Options) Option { return logOpts{opts} }
+func WithOnConnected(h func(*Client)) Option     { return onConnected(h) }
+func WithPrefix(p string) Option                 { return prefix(p) }
 
 type msgManager struct {
 	mutex sync.RWMutex
@@ -88,7 +91,8 @@ type Client struct {
 	pingPeriod time.Duration
 	conn       *websocket.Conn
 	processor  IWebsocketProcessor
-	logger     *logger.Logger
+	log        *log.Logger
+	logOpts    *log.Options
 
 	onConnected func(client *Client)
 
@@ -113,22 +117,26 @@ func NewClient(ctx context.Context, url string, receiver IWebsocketProcessor, op
 	}
 	wc.status.Store(StatusWaiting)
 	wc.getOpts(opts...)
-	if wc.logger == nil {
+	if wc.log == nil {
 		if len(wc.prefix) > 0 {
 			wc.prefix += "  "
 		}
 		prefix := wc.prefix + wc.URL
-		wc.logger = logger.NewWithOptions(os.Stdout, logger.Options{
-			ReportCaller:    true,
-			ReportTimestamp: true,
-			TimeFormat:      "3:04:05PM",
-			Prefix:          prefix,
-		})
+		logOpts := wc.logOpts
+		if logOpts == nil {
+			*logOpts = log.Options{
+				ReportCaller:    true,
+				ReportTimestamp: true,
+				TimeFormat:      time.DateTime,
+				Prefix:          prefix,
+			}
+		}
+		wc.log = log.NewWithOptions(os.Stdout, *logOpts)
 	}
 	if r, ok := receiver.(interface {
-		SetLogger(*logger.Logger)
+		SetLogger(*log.Logger)
 	}); ok {
-		r.SetLogger(wc.logger)
+		r.SetLogger(wc.log)
 	}
 	return wc
 }
@@ -158,7 +166,7 @@ func (wc *Client) Shutdown() error {
 	}
 
 	wc.status.Store(StatusDisconnecting)
-	wc.logger.Info("即将关闭 websocket 链接")
+	wc.log.Info("即将关闭 websocket 链接")
 	wc.mmer.clear()
 	wc.status.Store(StatusDisconnected)
 	close(wc.subscr)
@@ -166,7 +174,7 @@ func (wc *Client) Shutdown() error {
 	if err != nil {
 		return err
 	}
-	wc.logger.Info("websocket 链接已关闭")
+	wc.log.Info("websocket 链接已关闭")
 	return nil
 }
 
@@ -196,7 +204,7 @@ func (wc *Client) connect(reconnect bool) error {
 	defer cancel()
 	conn, _, err := websocket.DefaultDialer.DialContext(dialCtx, wc.URL, nil)
 	if err != nil {
-		wc.logger.Error("链接失败", err)
+		wc.log.Error("链接失败", err)
 		return err
 	}
 
@@ -214,7 +222,7 @@ func (wc *Client) reconnect() {
 	err := wc.connect(true)
 	if err != nil {
 		if err == closedErr {
-			wc.logger.Warn("websocket 已关闭取消重连...")
+			wc.log.Warn("websocket 已关闭取消重连...")
 			return
 		}
 
@@ -222,7 +230,7 @@ func (wc *Client) reconnect() {
 		wc.reconnect()
 		return
 	}
-	wc.logger.Warn("websocket 链接重连成功...")
+	wc.log.Warn("websocket 链接重连成功...")
 
 	if wc.onConnected != nil {
 		wc.onConnected(wc)
@@ -247,9 +255,9 @@ func (wc *Client) resendMessages() {
 func (wc *Client) accept() {
 	defer func() {
 		if err := recover(); err != nil {
-			wc.logger.Error("Accept 出现异常: ", err)
+			wc.log.Error("Accept 出现异常: ", err)
 		}
-		wc.logger.Info("已停止 accept...")
+		wc.log.Info("已停止 accept...")
 	}()
 
 	for {
@@ -263,7 +271,7 @@ func (wc *Client) accept() {
 				continue
 			}
 
-			wc.logger.Errorf("读取消息出错: %d, %+v", mt, err)
+			wc.log.Errorf("读取消息出错: %d, %+v", mt, err)
 			if mt == -1 || strings.Contains(err.Error(), "use of closed network connection") ||
 				websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) ||
 				websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
@@ -286,7 +294,7 @@ func (wc *Client) writePump() {
 	ticker := time.NewTicker(period)
 	defer func() {
 		ticker.Stop()
-		wc.logger.Info("已停止 writePump...")
+		wc.log.Info("已停止 writePump...")
 	}()
 
 	for {
@@ -314,7 +322,7 @@ func (wc *Client) writePump() {
 		case <-wc.ctx.Done():
 			err := wc.Shutdown()
 			if err != nil {
-				wc.logger.Error("关闭 websocket 链接出错:", "err", err)
+				wc.log.Error("关闭 websocket 链接出错:", "err", err)
 			}
 		}
 	}
@@ -333,20 +341,20 @@ func (wc *Client) writeMessage(msg IMessage, ok bool, subscribe bool) {
 	} else {
 		buf, err = json.Marshal(msg)
 		if err != nil {
-			wc.logger.Errorf("encode message[%+v] error: %v", msg, err)
+			wc.log.Errorf("encode message[%+v] error: %v", msg, err)
 			return
 		}
 	}
 
 	err = wc.conn.WriteMessage(websocket.TextMessage, buf)
 	if err != nil {
-		wc.logger.Errorf("发送消息失败: %s, %+v", buf, err)
+		wc.log.Errorf("发送消息失败: %s, %+v", buf, err)
 		return
 	}
 	if msg.IsPing() {
-		wc.logger.Debugf("发送ping消息: %s", buf)
+		wc.log.Debugf("发送ping消息: %s", buf)
 	} else {
-		wc.logger.Infof("发送消息: %s", buf)
+		wc.log.Infof("发送消息: %s", buf)
 	}
 }
 
