@@ -1,11 +1,9 @@
-# websocket
-This is a golang websocket client easy to use
+package websocket
 
-## Usage
-```go
 import (
 	"context"
 	"io"
+	"testing"
 
 	logger "github.com/charmbracelet/log"
 )
@@ -32,7 +30,7 @@ type Message struct {
 	Name string
 }
 
-func main() {
+func TestConn(t *testing.T) {
 	ctx := context.Background()
 	client := NewClient(ctx, "ws://121.40.165.18:8800", &Receiver{}, WithPing(NewStringMessage("ping")))
 	err := client.Connect()
@@ -46,4 +44,3 @@ func main() {
 
 	<-make(chan struct{})
 }
-```
