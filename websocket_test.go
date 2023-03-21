@@ -8,21 +8,15 @@ import (
 	logger "github.com/charmbracelet/log"
 )
 
-type Receiver struct {
-	*logger.Logger
-}
+type Receiver struct{}
 
 func (r *Receiver) OnReceive(frame *Frame) {
 	bs, err := io.ReadAll(frame.Reader)
 	if err != nil {
-		r.Error("读取消息失败!", "err", err)
+		logger.Error("读取消息失败!", "err", err)
 		return
 	}
-	r.Infof("收到消息: %s", bs)
-}
-
-func (r *Receiver) SetLogger(l *logger.Logger) {
-	r.Logger = l
+	logger.Infof("收到消息: %s", bs)
 }
 
 type Message struct {

@@ -2,8 +2,6 @@ package websocket
 
 import (
 	"io"
-
-	logger "github.com/charmbracelet/log"
 )
 
 type Frame struct {
@@ -35,5 +33,4 @@ type IWebsocket interface {
 
 type IWebsocketProcessor interface {
 	OnReceive(frame *Frame)
-	SetLogger(l *logger.Logger)
 }

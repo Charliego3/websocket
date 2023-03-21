@@ -23,6 +23,7 @@ func (r *Receiver) OnReceive(frame *Frame) {
 	r.Infof("收到消息: %s", bs)
 }
 
+// SetLogger is a Optional func with Processor
 func (r *Receiver) SetLogger(l *logger.Logger) {
 	r.Logger = l
 }

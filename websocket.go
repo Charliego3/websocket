@@ -121,11 +121,15 @@ func NewClient(ctx context.Context, url string, receiver IWebsocketProcessor, op
 		wc.logger = logger.NewWithOptions(os.Stdout, logger.Options{
 			ReportCaller:    true,
 			ReportTimestamp: true,
-			TimeFormat:      time.Kitchen,
+			TimeFormat:      "3:04:05PM",
 			Prefix:          prefix,
 		})
 	}
-	receiver.SetLogger(wc.logger)
+	if r, ok := receiver.(interface {
+		SetLogger(*logger.Logger)
+	}); ok {
+		r.SetLogger(wc.logger)
+	}
 	return wc
 }
 
