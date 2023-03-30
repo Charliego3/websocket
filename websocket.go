@@ -3,6 +3,7 @@ package websocket
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"sync"
@@ -22,33 +23,16 @@ const (
 
 var closedErr = errors.New("has been closed.")
 
-type Option interface {
-	Apply(wc *Client)
-}
+type Option func(c *Client)
 
-type dialTimeout time.Duration
-type pingPeriod time.Duration
-type ping struct{ IMessage }
-type logger struct{ l *log.Logger }
-type onConnected func(client *Client)
-type prefix string
-type logOpts struct{ *log.Options }
-
-func (ww dialTimeout) Apply(wc *Client) { wc.timeout = time.Duration(ww) }
-func (wp pingPeriod) Apply(wc *Client)  { wc.pingPeriod = time.Duration(wp) }
-func (p ping) Apply(wc *Client)         { wc.ping = p.IMessage }
-func (p logger) Apply(wc *Client)       { wc.log = p.l }
-func (o logOpts) Apply(wc *Client)      { wc.logOpts = o.Options }
-func (h onConnected) Apply(wc *Client)  { wc.onConnected = h }
-func (h prefix) Apply(wc *Client)       { wc.prefix = string(h) }
-
-func WithDialTimeout(wt time.Duration) Option    { return dialTimeout(wt) }
-func WithPingPeriod(wp time.Duration) Option     { return pingPeriod(wp) }
-func WithPing(p IMessage) Option                 { return ping{p} }
-func WithLogger(l *log.Logger) Option            { return logger{l} }
-func WithLoggerOptions(opts *log.Options) Option { return logOpts{opts} }
-func WithOnConnected(h func(*Client)) Option     { return onConnected(h) }
-func WithPrefix(p string) Option                 { return prefix(p) }
+func WithDialTimeout(timeout time.Duration) Option { return func(c *Client) { c.timeout = timeout } }
+func WithPingPeriod(period time.Duration) Option   { return func(c *Client) { c.pingPeriod = period } }
+func WithPing(msg IMessage) Option                 { return func(c *Client) { c.ping = msg } }
+func WithLogger(logger *log.Logger) Option         { return func(c *Client) { c.log = logger } }
+func WithLoggerOptions(opts *log.Options) Option   { return func(c *Client) { c.logOpts = opts } }
+func WithLoggerWriter(writer io.Writer) Option     { return func(c *Client) { c.logWriter = writer } }
+func WithOnConnected(f func(*Client)) Option       { return func(c *Client) { c.onConnected = f } }
+func WithPrefix(prefix string) Option              { return func(c *Client) { c.prefix = prefix } }
 
 type msgManager struct {
 	mutex sync.RWMutex
@@ -90,14 +74,18 @@ type Client struct {
 	timeout    time.Duration
 	pingPeriod time.Duration
 	conn       *websocket.Conn
-	processor  IWebsocketProcessor
+	processor  IReceiver
 	log        *log.Logger
 	logOpts    *log.Options
+	logWriter  io.Writer
 
 	onConnected func(client *Client)
 
 	subscr chan IMessage
 	unsub  chan IMessage
+	wchan  chan struct{}
+	rchan  chan struct{}
+	cchan  chan struct{}
 	status atomic.Value
 	mutex  sync.RWMutex
 	mmer   *msgManager
@@ -106,13 +94,16 @@ type Client struct {
 	prefix string
 }
 
-func NewClient(ctx context.Context, url string, receiver IWebsocketProcessor, opts ...Option) *Client {
+func NewClient(ctx context.Context, url string, receiver IReceiver, opts ...Option) *Client {
 	wc := &Client{
 		URL:       url,
 		ctx:       ctx,
 		processor: receiver,
 		subscr:    make(chan IMessage, 5),
 		unsub:     make(chan IMessage),
+		wchan:     make(chan struct{}),
+		rchan:     make(chan struct{}),
+		cchan:     make(chan struct{}),
 		mmer:      &msgManager{data: make(map[IMessage]struct{})},
 	}
 	wc.status.Store(StatusWaiting)
@@ -124,14 +115,25 @@ func NewClient(ctx context.Context, url string, receiver IWebsocketProcessor, op
 		prefix := wc.prefix + wc.URL
 		logOpts := wc.logOpts
 		if logOpts == nil {
-			*logOpts = log.Options{
+			logOpts = &log.Options{
 				ReportCaller:    true,
 				ReportTimestamp: true,
 				TimeFormat:      time.DateTime,
 				Prefix:          prefix,
 			}
+		} else {
+			prefix = logOpts.Prefix
+			if len(prefix) > 0 {
+				prefix += "  "
+			}
+			prefix += wc.URL
+			logOpts.Prefix = prefix
 		}
-		wc.log = log.NewWithOptions(os.Stdout, *logOpts)
+		writer := wc.logWriter
+		if writer == nil {
+			writer = os.Stdout
+		}
+		wc.log = log.NewWithOptions(writer, *logOpts)
 	}
 	if r, ok := receiver.(interface {
 		SetLogger(*log.Logger)
@@ -146,7 +148,7 @@ func (wc *Client) getOpts(opts ...Option) {
 		if opt == nil {
 			continue
 		}
-		opt.Apply(wc)
+		opt(wc)
 	}
 }
 
@@ -166,7 +168,7 @@ func (wc *Client) Shutdown() error {
 	}
 
 	wc.status.Store(StatusDisconnecting)
-	wc.log.Info("即将关闭 websocket 链接")
+	wc.log.Info("closing websocket connection")
 	wc.mmer.clear()
 	wc.status.Store(StatusDisconnected)
 	close(wc.subscr)
@@ -174,7 +176,10 @@ func (wc *Client) Shutdown() error {
 	if err != nil {
 		return err
 	}
-	wc.log.Info("websocket 链接已关闭")
+	wc.cchan <- struct{}{}
+	<-wc.rchan
+	<-wc.wchan
+	wc.log.Info("websocket connection has be closed")
 	return nil
 }
 
@@ -204,7 +209,7 @@ func (wc *Client) connect(reconnect bool) error {
 	defer cancel()
 	conn, _, err := websocket.DefaultDialer.DialContext(dialCtx, wc.URL, nil)
 	if err != nil {
-		wc.log.Error("链接失败", err)
+		wc.log.Error("connect", "err", err)
 		return err
 	}
 
@@ -222,7 +227,7 @@ func (wc *Client) reconnect() {
 	err := wc.connect(true)
 	if err != nil {
 		if err == closedErr {
-			wc.log.Warn("websocket 已关闭取消重连...")
+			wc.log.Warn("websocket closed, cancel reconnect...")
 			return
 		}
 
@@ -230,7 +235,7 @@ func (wc *Client) reconnect() {
 		wc.reconnect()
 		return
 	}
-	wc.log.Warn("websocket 链接重连成功...")
+	wc.log.Warn("websocket reconnected")
 
 	if wc.onConnected != nil {
 		wc.onConnected(wc)
@@ -255,9 +260,10 @@ func (wc *Client) resendMessages() {
 func (wc *Client) accept() {
 	defer func() {
 		if err := recover(); err != nil {
-			wc.log.Error("Accept 出现异常: ", err)
+			wc.log.Error("accept", "err", err)
 		}
-		wc.log.Info("已停止 accept...")
+		wc.log.Info("stopped acceptor...")
+		wc.rchan <- struct{}{}
 	}()
 
 	for {
@@ -271,7 +277,7 @@ func (wc *Client) accept() {
 				continue
 			}
 
-			wc.log.Errorf("读取消息出错: %d, %+v", mt, err)
+			wc.log.Error("read message", "type", getMessageType(mt), "err", err)
 			if mt == -1 || strings.Contains(err.Error(), "use of closed network connection") ||
 				websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) ||
 				websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
@@ -281,11 +287,26 @@ func (wc *Client) accept() {
 			continue
 		}
 
-		// 1:TextMessage 2:BinaryMessage 8:CloseMessage 9:PingMessage 10:PongMessage
 		wc.processor.OnReceive(&Frame{
 			Type:   mt,
 			Reader: r,
 		})
+	}
+}
+
+// getMessageType 1:TextMessage 2:BinaryMessage 8:CloseMessage 9:PingMessage 10:PongMessage
+func getMessageType(t int) string {
+	switch t {
+	default:
+		return "TextMessage"
+	case 2:
+		return "BinaryMessage"
+	case 8:
+		return "CloseMessage"
+	case 9:
+		return "PingMessage"
+	case 10:
+		return "PongMessage"
 	}
 }
 
@@ -294,7 +315,8 @@ func (wc *Client) writePump() {
 	ticker := time.NewTicker(period)
 	defer func() {
 		ticker.Stop()
-		wc.log.Info("已停止 writePump...")
+		wc.log.Info("stopped writer...")
+		wc.wchan <- struct{}{}
 	}()
 
 	for {
@@ -315,6 +337,8 @@ func (wc *Client) writePump() {
 			}
 
 			wc.subscr <- wc.ping
+		case <-wc.cchan:
+			return
 		case msg, ok := <-wc.subscr:
 			wc.writeMessage(msg, ok, true)
 		case msg, ok := <-wc.unsub:
@@ -322,7 +346,7 @@ func (wc *Client) writePump() {
 		case <-wc.ctx.Done():
 			err := wc.Shutdown()
 			if err != nil {
-				wc.log.Error("关闭 websocket 链接出错:", "err", err)
+				wc.log.Error("shutdown websocket", "err", err)
 			}
 		}
 	}
@@ -341,20 +365,20 @@ func (wc *Client) writeMessage(msg IMessage, ok bool, subscribe bool) {
 	} else {
 		buf, err = json.Marshal(msg)
 		if err != nil {
-			wc.log.Errorf("encode message[%+v] error: %v", msg, err)
+			wc.log.Error("encode message", "message", msg, "err", err)
 			return
 		}
 	}
 
 	err = wc.conn.WriteMessage(websocket.TextMessage, buf)
 	if err != nil {
-		wc.log.Errorf("发送消息失败: %s, %+v", buf, err)
+		wc.log.Error("send message", "err", err)
 		return
 	}
 	if msg.IsPing() {
-		wc.log.Debugf("发送ping消息: %s", buf)
+		wc.log.Debug("send [ping]", "message", string(buf))
 	} else {
-		wc.log.Infof("发送消息: %s", buf)
+		wc.log.Info("send", "message", string(buf))
 	}
 }
 
@@ -369,11 +393,11 @@ func (wc *Client) Unsubscribe(message IMessage) error {
 func (wc *Client) send(subscribe bool, message IMessage) error {
 	switch wc.status.Load() {
 	case StatusDisconnected:
-		return fmt.Errorf("websocket 已断开链接: %+v", message)
+		return fmt.Errorf("websocket disconnected: %+v", message)
 	case StatusReConnecting, StatusConnecting, StatusWaiting:
-		return fmt.Errorf("websocket 尚未链接成功: %+v", message)
+		return fmt.Errorf("websocket connecting: %+v", message)
 	case StatusDisconnecting:
-		return fmt.Errorf("websocket 链接已关闭: %+v", message)
+		return fmt.Errorf("websocket disconecting: %+v", message)
 	}
 	if subscribe {
 		wc.subscr <- message

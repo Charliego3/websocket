@@ -4,19 +4,26 @@ import (
 	"context"
 	"io"
 	"testing"
+	"time"
 
 	"github.com/charmbracelet/log"
 )
 
-type Receiver struct{}
+type Receiver struct {
+	logger *log.Logger
+}
 
 func (r *Receiver) OnReceive(frame *Frame) {
 	bs, err := io.ReadAll(frame.Reader)
 	if err != nil {
-		log.Error("读取消息失败!", "err", err)
+		r.logger.Error("read message error", "err", err)
 		return
 	}
-	log.Infof("收到消息: %s", bs)
+	r.logger.Info("receive", "message", string(bs))
+}
+
+func (r *Receiver) SetLogger(logger *log.Logger) {
+	r.logger = logger
 }
 
 type Message struct {
@@ -25,16 +32,22 @@ type Message struct {
 }
 
 func TestConn(t *testing.T) {
-	ctx := context.Background()
-	client := NewClient(ctx, "ws://121.40.165.18:8800", &Receiver{}, WithPing(NewStringMessage("ping")))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	client := NewClient(
+		ctx, "ws://121.40.165.18:8800",
+		&Receiver{}, WithPing(NewStringMessage("ping")),
+		WithPrefix("Tester"),
+	)
 	err := client.Connect()
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	client.Subscribe(&Message{
+	_ = client.Subscribe(&Message{
 		Name: "Joe",
 	})
 
-	<-make(chan struct{})
+	<-time.Tick(time.Second * 5)
+	_ = client.Shutdown()
 }

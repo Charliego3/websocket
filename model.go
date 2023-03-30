@@ -31,6 +31,6 @@ type IWebsocket interface {
 	SendMessage(message IMessage) error
 }
 
-type IWebsocketProcessor interface {
+type IReceiver interface {
 	OnReceive(frame *Frame)
 }
