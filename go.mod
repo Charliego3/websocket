@@ -1,6 +1,6 @@
 module github.com/charliego93/websocket
 
-go 1.20
+go 1.19
 
 require (
 	github.com/charmbracelet/log v0.2.1

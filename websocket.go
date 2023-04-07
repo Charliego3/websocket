@@ -118,7 +118,7 @@ func NewClient(ctx context.Context, url string, receiver IReceiver, opts ...Opti
 			logOpts = &log.Options{
 				ReportCaller:    true,
 				ReportTimestamp: true,
-				TimeFormat:      time.DateTime,
+				TimeFormat:      "2006-01-02 15:04:05",
 				Prefix:          prefix,
 			}
 		} else {
