@@ -3,8 +3,6 @@ package websocket
 import (
 	"context"
 	"fmt"
-	"io"
-	"os"
 	"strings"
 	"sync"
 	"time"
@@ -22,17 +20,6 @@ const (
 )
 
 var closedErr = errors.New("has been closed.")
-
-type Option func(c *Client)
-
-func WithDialTimeout(timeout time.Duration) Option { return func(c *Client) { c.timeout = timeout } }
-func WithPingPeriod(period time.Duration) Option   { return func(c *Client) { c.pingPeriod = period } }
-func WithPing(msg IMessage) Option                 { return func(c *Client) { c.ping = msg } }
-func WithLogger(logger *log.Logger) Option         { return func(c *Client) { c.log = logger } }
-func WithLoggerOptions(opts *log.Options) Option   { return func(c *Client) { c.logOpts = opts } }
-func WithLoggerWriter(writer io.Writer) Option     { return func(c *Client) { c.logWriter = writer } }
-func WithOnConnected(f func(*Client)) Option       { return func(c *Client) { c.onConnected = f } }
-func WithPrefix(prefix string) Option              { return func(c *Client) { c.prefix = prefix } }
 
 type msgManager struct {
 	mutex sync.RWMutex
@@ -69,29 +56,20 @@ func (m *msgManager) getData() map[IMessage]struct{} {
 }
 
 type Client struct {
-	URL        string
-	ping       IMessage
-	timeout    time.Duration
-	pingPeriod time.Duration
-	conn       *websocket.Conn
-	processor  IReceiver
-	log        *log.Logger
-	logOpts    *log.Options
-	logWriter  io.Writer
-
-	onConnected func(client *Client)
-
-	subscr chan IMessage
-	unsub  chan IMessage
-	wchan  chan struct{}
-	rchan  chan struct{}
-	cchan  chan struct{}
-	status atomic.Value
-	mutex  sync.RWMutex
-	mmer   *msgManager
-
-	ctx    context.Context
-	prefix string
+	ctx       context.Context
+	URL       string
+	conn      *websocket.Conn
+	processor IReceiver
+	subscr    chan IMessage
+	unsub     chan IMessage
+	wchan     chan struct{}
+	rchan     chan struct{}
+	cchan     chan struct{}
+	status    atomic.Value
+	mutex     sync.RWMutex
+	mmer      *msgManager
+	logger    *log.Logger
+	opts      *Options
 }
 
 func NewClient(ctx context.Context, url string, receiver IReceiver, opts ...Option) *Client {
@@ -108,47 +86,30 @@ func NewClient(ctx context.Context, url string, receiver IReceiver, opts ...Opti
 	}
 	wc.status.Store(StatusWaiting)
 	wc.getOpts(opts...)
-	if wc.log == nil {
-		if len(wc.prefix) > 0 {
-			wc.prefix += "  "
+	if wc.opts.logger == nil {
+		if !wc.opts.hideURL {
+			wc.opts.prefix += "  " + wc.URL
 		}
-		prefix := wc.prefix + wc.URL
-		logOpts := wc.logOpts
-		if logOpts == nil {
-			logOpts = &log.Options{
-				ReportCaller:    true,
-				ReportTimestamp: true,
-				TimeFormat:      "2006-01-02 15:04:05",
-				Prefix:          prefix,
-			}
-		} else {
-			prefix = logOpts.Prefix
-			if len(prefix) > 0 {
-				prefix += "  "
-			}
-			prefix += wc.URL
-			logOpts.Prefix = prefix
-		}
-		writer := wc.logWriter
-		if writer == nil {
-			writer = os.Stdout
-		}
-		wc.log = log.NewWithOptions(writer, *logOpts)
+		wc.logger = log.WithPrefix(wc.opts.prefix)
+	} else {
+		wc.logger = wc.opts.logger
+		wc.opts.logger = nil
 	}
 	if r, ok := receiver.(interface {
 		SetLogger(*log.Logger)
 	}); ok {
-		r.SetLogger(wc.log)
+		r.SetLogger(wc.logger)
 	}
 	return wc
 }
 
 func (wc *Client) getOpts(opts ...Option) {
+	wc.opts = &Options{}
 	for _, opt := range opts {
 		if opt == nil {
 			continue
 		}
-		opt(wc)
+		opt(wc.opts)
 	}
 }
 
@@ -168,7 +129,7 @@ func (wc *Client) Shutdown() error {
 	}
 
 	wc.status.Store(StatusDisconnecting)
-	wc.log.Info("closing websocket connection")
+	wc.logger.Info("closing websocket connection")
 	wc.mmer.clear()
 	wc.status.Store(StatusDisconnected)
 	close(wc.subscr)
@@ -179,16 +140,12 @@ func (wc *Client) Shutdown() error {
 	wc.cchan <- struct{}{}
 	<-wc.rchan
 	<-wc.wchan
-	wc.log.Info("websocket connection has be closed")
+	wc.logger.Info("websocket connection has be closed")
 	return nil
 }
 
 func (wc *Client) Connect() error {
-	err := wc.connect(false)
-	if err == nil && wc.onConnected != nil {
-		wc.onConnected(wc)
-	}
-	return err
+	return wc.connect(false)
 }
 
 func (wc *Client) connect(reconnect bool) error {
@@ -205,11 +162,11 @@ func (wc *Client) connect(reconnect bool) error {
 	} else {
 		wc.status.Store(StatusConnecting)
 	}
-	dialCtx, cancel := context.WithTimeout(context.Background(), durationDefault(wc.timeout, defaultWait))
+	dialCtx, cancel := context.WithTimeout(context.Background(), durationDefault(wc.opts.timeout, defaultWait))
 	defer cancel()
 	conn, _, err := websocket.DefaultDialer.DialContext(dialCtx, wc.URL, nil)
 	if err != nil {
-		wc.log.Error("connect", "err", err)
+		wc.logger.Error("connect", "err", err)
 		return err
 	}
 
@@ -220,14 +177,22 @@ func (wc *Client) connect(reconnect bool) error {
 		go wc.accept()
 		go wc.writePump()
 	}
+
+	if err == nil && wc.opts.onConnected != nil {
+		wc.opts.onConnected(wc)
+	}
 	return nil
 }
 
 func (wc *Client) reconnect() {
+	if wc.opts.disableReconnect {
+		return
+	}
+
 	err := wc.connect(true)
 	if err != nil {
 		if err == closedErr {
-			wc.log.Warn("websocket closed, cancel reconnect...")
+			wc.logger.Warn("websocket closed, cancel reconnect...")
 			return
 		}
 
@@ -235,11 +200,7 @@ func (wc *Client) reconnect() {
 		wc.reconnect()
 		return
 	}
-	wc.log.Warn("websocket reconnected")
-
-	if wc.onConnected != nil {
-		wc.onConnected(wc)
-	}
+	wc.logger.Warn("websocket reconnected")
 	wc.resendMessages()
 }
 
@@ -260,9 +221,9 @@ func (wc *Client) resendMessages() {
 func (wc *Client) accept() {
 	defer func() {
 		if err := recover(); err != nil {
-			wc.log.Error("accept", "err", err)
+			wc.logger.Error("accept", "err", err)
 		}
-		wc.log.Info("stopped acceptor...")
+		wc.logger.Info("stopped acceptor...")
 		wc.rchan <- struct{}{}
 	}()
 
@@ -277,10 +238,14 @@ func (wc *Client) accept() {
 				continue
 			}
 
-			wc.log.Error("read message", "type", getMessageType(mt), "err", err)
+			wc.logger.Error("read message", "type", getMessageType(mt), "err", err)
 			if mt == -1 || strings.Contains(err.Error(), "use of closed network connection") ||
 				websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) ||
 				websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
+				if wc.opts.disableReconnect {
+					_ = wc.Shutdown()
+					return
+				}
 				wc.reconnect()
 			}
 
@@ -311,11 +276,11 @@ func getMessageType(t int) string {
 }
 
 func (wc *Client) writePump() {
-	period := durationDefault(wc.pingPeriod, defaultPingPeriod)
+	period := durationDefault(wc.opts.period, defaultPingPeriod)
 	ticker := time.NewTicker(period)
 	defer func() {
 		ticker.Stop()
-		wc.log.Info("stopped writer...")
+		wc.logger.Info("stopped writer...")
 		wc.wchan <- struct{}{}
 	}()
 
@@ -331,12 +296,12 @@ func (wc *Client) writePump() {
 				continue
 			}
 
-			if wc.ping == nil {
+			if wc.opts.ping == nil {
 				ticker.Stop()
 				continue
 			}
 
-			wc.subscr <- wc.ping
+			wc.subscr <- wc.opts.ping
 		case <-wc.cchan:
 			return
 		case msg, ok := <-wc.subscr:
@@ -346,7 +311,7 @@ func (wc *Client) writePump() {
 		case <-wc.ctx.Done():
 			err := wc.Shutdown()
 			if err != nil {
-				wc.log.Error("shutdown websocket", "err", err)
+				wc.logger.Error("shutdown websocket", "err", err)
 			}
 		}
 	}
@@ -365,20 +330,20 @@ func (wc *Client) writeMessage(msg IMessage, ok bool, subscribe bool) {
 	} else {
 		buf, err = json.Marshal(msg)
 		if err != nil {
-			wc.log.Error("encode message", "message", msg, "err", err)
+			wc.logger.Error("encode message", "message", msg, "err", err)
 			return
 		}
 	}
 
 	err = wc.conn.WriteMessage(websocket.TextMessage, buf)
 	if err != nil {
-		wc.log.Error("send message", "err", err)
+		wc.logger.Error("send message", "err", err)
 		return
 	}
 	if msg.IsPing() {
-		wc.log.Debug("send [ping]", "message", string(buf))
+		wc.logger.Debug("send [ping]", "message", string(buf))
 	} else {
-		wc.log.Info("send", "message", string(buf))
+		wc.logger.Info("send", "message", string(buf))
 	}
 }
 

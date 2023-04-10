@@ -38,7 +38,11 @@ func TestConn(t *testing.T) {
 		ctx, "ws://121.40.165.18:8800",
 		&Receiver{}, WithPing(NewStringMessage("ping")),
 		WithPrefix("Tester"),
+		WithOnConnected(func(client *Client) {
+			client.logger.Info("websocket connected...")
+		}),
 	)
+
 	err := client.Connect()
 	if err != nil {
 		log.Fatal(err)
