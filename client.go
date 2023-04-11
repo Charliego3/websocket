@@ -59,7 +59,7 @@ type Client struct {
 	ctx       context.Context
 	URL       string
 	conn      *websocket.Conn
-	processor IReceiver
+	processor Receiver
 	subscr    chan IMessage
 	unsub     chan IMessage
 	wchan     chan struct{}
@@ -72,7 +72,7 @@ type Client struct {
 	opts      *Options
 }
 
-func NewClient(ctx context.Context, url string, receiver IReceiver, opts ...Option) *Client {
+func NewClient(ctx context.Context, url string, receiver Receiver, opts ...Option) *Client {
 	wc := &Client{
 		URL:       url,
 		ctx:       ctx,
@@ -88,7 +88,10 @@ func NewClient(ctx context.Context, url string, receiver IReceiver, opts ...Opti
 	wc.getOpts(opts...)
 	if wc.opts.logger == nil {
 		if !wc.opts.hideURL {
-			wc.opts.prefix += "  " + wc.URL
+			if len(wc.opts.prefix) > 0 {
+				wc.opts.prefix += "  "
+			}
+			wc.opts.prefix += wc.URL
 		}
 		wc.logger = log.WithPrefix(wc.opts.prefix)
 	} else {
@@ -229,6 +232,7 @@ func (wc *Client) accept() {
 
 	for {
 		mt, r, err := wc.conn.NextReader()
+		msgType := MessageType(mt)
 		if err != nil {
 			switch wc.status.Load() {
 			case StatusDisconnected:
@@ -238,7 +242,7 @@ func (wc *Client) accept() {
 				continue
 			}
 
-			wc.logger.Error("read message", "type", getMessageType(mt), "err", err)
+			wc.logger.Error("read message", "type", msgType.String(), "err", err)
 			if mt == -1 || strings.Contains(err.Error(), "use of closed network connection") ||
 				websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) ||
 				websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
@@ -253,25 +257,9 @@ func (wc *Client) accept() {
 		}
 
 		wc.processor.OnReceive(&Frame{
-			Type:   mt,
+			Type:   msgType,
 			Reader: r,
 		})
-	}
-}
-
-// getMessageType 1:TextMessage 2:BinaryMessage 8:CloseMessage 9:PingMessage 10:PongMessage
-func getMessageType(t int) string {
-	switch t {
-	default:
-		return "TextMessage"
-	case 2:
-		return "BinaryMessage"
-	case 8:
-		return "CloseMessage"
-	case 9:
-		return "PingMessage"
-	case 10:
-		return "PongMessage"
 	}
 }
 
