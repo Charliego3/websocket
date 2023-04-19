@@ -187,7 +187,7 @@ func (wc *Client) connect(reconnect bool) error {
 	return nil
 }
 
-func (wc *Client) reconnect() {
+func (wc *Client) Reconnect() {
 	if wc.opts.disableReconnect {
 		return
 	}
@@ -200,7 +200,7 @@ func (wc *Client) reconnect() {
 		}
 
 		time.Sleep(time.Second)
-		wc.reconnect()
+		wc.Reconnect()
 		return
 	}
 	wc.logger.Warn("websocket reconnected")
@@ -250,7 +250,7 @@ func (wc *Client) accept() {
 					_ = wc.Shutdown()
 					return
 				}
-				wc.reconnect()
+				wc.Reconnect()
 			}
 
 			continue
