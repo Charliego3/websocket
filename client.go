@@ -30,11 +30,8 @@ type clientOpts struct {
 
 	onConnected   OnConnectedHandler
 	onReconnected ReConnectedHandler
-	onMessage     OnMessageHandler
 	decompress    DecompressHandler
 	errHandler    ErrorHandler
-
-	parser Parser
 }
 
 func newOpts() *clientOpts {
@@ -45,21 +42,24 @@ func newOpts() *clientOpts {
 	opts.connectTimeout = time.Second * 30
 	opts.onConnected = func(*Client) {}
 	opts.onReconnected = func(*Client) {}
-	opts.onMessage = func(Frame) {}
-	opts.parser = new(ReaderParser)
 	return opts
 }
 
 type Client struct {
 	*clientOpts
-	ctx    context.Context
-	wsURL  string
-	conn   *websocket.Conn
-	status Status
-	stopC  chan struct{}
+	ctx      context.Context
+	wsURL    string
+	conn     *websocket.Conn
+	status   Status
+	stopC    chan struct{}
+	receiver Receiver
 }
 
-func NewClient(ctx context.Context, wsURL string, opts ...Option[Client]) (*Client, error) {
+func NewClient(ctx context.Context, wsURL string, receiver Receiver, opts ...Option[Client]) (*Client, error) {
+	if receiver == nil {
+		return nil, errors.New("can't using nil receiver")
+	}
+
 	if c, ok := conns[wsURL]; ok {
 		return c, nil
 	}
@@ -74,6 +74,7 @@ func NewClient(ctx context.Context, wsURL string, opts ...Option[Client]) (*Clie
 	client := new(Client)
 	client.ctx = ctx
 	client.clientOpts = newOpts()
+	client.receiver = receiver
 	client.wsURL = wsURL
 	client.errHandler = client.defaultErrorHandler
 	applyOpts[Client](client, opts)
@@ -89,89 +90,89 @@ func NewClient(ctx context.Context, wsURL string, opts ...Option[Client]) (*Clie
 	return client, nil
 }
 
-func (o *Client) connect() (err error) {
-	dialer, err := o.getDialer()
+func (c *Client) connect() (err error) {
+	dialer, err := c.getDialer()
 	if err != nil {
 		return err
 	}
 
-	o.conn, _, err = dialer.Dial(o.wsURL, o.header)
+	c.conn, _, err = dialer.Dial(c.wsURL, c.header)
 	if err != nil {
 		return
 	}
 
-	go o.readLoop()
+	go c.readLoop()
 	return
 }
 
-func (o *Client) reconnect() {
-	o.status = StatusReConnecting
-	if err := o.connect(); err != nil {
+func (c *Client) reconnect() {
+	c.status = StatusReConnecting
+	if err := c.connect(); err != nil {
 		return
 	}
 
-	o.status = StatusConnected
-	o.onReconnected(o)
+	c.status = StatusConnected
+	c.onReconnected(c)
 }
 
-func (o *Client) setWriteDeadLine() {
-	_ = o.conn.SetWriteDeadline(time.Now().Add(o.writeTimeout))
+func (c *Client) setWriteDeadLine() {
+	_ = c.conn.SetWriteDeadline(time.Now().Add(c.writeTimeout))
 }
 
-func (o *Client) SendMessage(message []byte) error {
-	o.setWriteDeadLine()
-	return o.conn.WriteMessage(websocket.TextMessage, message)
+func (c *Client) SendMessage(message []byte) error {
+	c.setWriteDeadLine()
+	return c.conn.WriteMessage(websocket.TextMessage, message)
 }
 
-func (o *Client) SendJson(message any) error {
-	o.setWriteDeadLine()
-	return o.conn.WriteJSON(message)
+func (c *Client) SendJson(message any) error {
+	c.setWriteDeadLine()
+	return c.conn.WriteJSON(message)
 }
 
-func (o *Client) SendPing(message []byte) error {
-	o.setWriteDeadLine()
-	return o.conn.WriteMessage(websocket.PingMessage, message)
+func (c *Client) SendPing(message []byte) error {
+	c.setWriteDeadLine()
+	return c.conn.WriteMessage(websocket.PingMessage, message)
 }
 
-func (o *Client) SendPong(message []byte) error {
-	o.setWriteDeadLine()
-	return o.conn.WriteMessage(websocket.PongMessage, message)
+func (c *Client) SendPong(message []byte) error {
+	c.setWriteDeadLine()
+	return c.conn.WriteMessage(websocket.PongMessage, message)
 }
 
-func (o *Client) SendClose(message []byte) error {
-	o.setWriteDeadLine()
-	return o.conn.WriteMessage(websocket.CloseMessage, message)
+func (c *Client) SendClose(message []byte) error {
+	c.setWriteDeadLine()
+	return c.conn.WriteMessage(websocket.CloseMessage, message)
 }
 
-func (o *Client) readLoop() {
-	//o.conn.SetPingHandler(nil)
-	//o.conn.SetPongHandler(func(appData string) error {
+func (c *Client) readLoop() {
+	//c.conn.SetPingHandler(nil)
+	//c.conn.SetPongHandler(func(appData string) error {
 	//	return nil
 	//})
 
 	readFrame := func() bool {
 		defer func() {
 			if err := recover(); err != nil {
-				o.logger.Error("failed to process received message",
+				c.logger.Error("failed to process received message",
 					slog.Any("err", err))
 			}
 		}()
 
 		select {
-		case <-o.stopC:
-			o.logger.Info("websocket accept is stopped")
+		case <-c.stopC:
+			c.logger.Info("websocket accept is stopped")
 			return true
-		case <-o.ctx.Done():
-			o.logger.Info("received stop command")
+		case <-c.ctx.Done():
+			c.logger.Info("received stop command")
 			return true
 		default:
-			_ = o.conn.SetReadDeadline(time.Now().Add(o.readTimeout))
-			ft, reader, err := o.conn.NextReader()
+			_ = c.conn.SetReadDeadline(time.Now().Add(c.readTimeout))
+			ft, reader, err := c.conn.NextReader()
 			if err != nil {
-				if o.autoReconnect {
-					o.reconnect()
+				if c.autoReconnect {
+					c.reconnect()
 				} else {
-					_ = o.conn.Close()
+					_ = c.conn.Close()
 				}
 				return true
 			}
@@ -181,19 +182,19 @@ func (o *Client) readLoop() {
 				return false
 			}
 
-			if frameType == FrameTypeBinary && o.decompress != nil {
-				if reader, err = o.decompress(reader); err != nil {
-					o.errHandler(frameType, errors.Wrap(err, "failed to decompress frame"))
+			if frameType == FrameTypeBinary && c.decompress != nil {
+				if reader, err = c.decompress(reader); err != nil {
+					c.errHandler(frameType, errors.Wrap(err, "failed to decompress frame"))
 					return false
 				}
 			}
 
-			frame, per := o.parser.Parse(frameType, reader)
+			frame, per := c.receiver.Unmarshal(frameType, reader)
 			if per != nil {
-				o.errHandler(frameType, errors.Wrap(per, "failed to parse frame"))
+				c.errHandler(frameType, errors.Wrap(per, "failed to parse frame"))
 				return false
 			}
-			o.onMessage(frame)
+			c.receiver.OnMessage(frame)
 			return false
 		}
 	}
@@ -205,9 +206,9 @@ func (o *Client) readLoop() {
 	}
 }
 
-func (o *Client) defaultErrorHandler(frameType FrameType, err error) {
-	o.logger.Error("websocket got an error",
-		slog.String("URL", o.wsURL),
+func (c *Client) defaultErrorHandler(frameType FrameType, err error) {
+	c.logger.Error("websocket got an error",
+		slog.String("URL", c.wsURL),
 		slog.String("frameType", frameType.String()),
 		slog.Any("err", err),
 	)
