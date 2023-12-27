@@ -1,12 +1,12 @@
 package websocket
 
-//go:generate enumer -type MessageType -text -values -json -trimprefix Message -output type_string.go
-type MessageType int
+//go:generate enumer -type FrameType -text -values -json -trimprefix FrameType -output type_string.go
+type FrameType int
 
 const (
-	MessageText MessageType = iota + 1
-	MessageBinary
-	MessageClose
-	MessagePing
-	MessagePong
+	FrameTypeText FrameType = iota + 1
+	FrameTypeBinary
+	FrameTypeClose = iota + 6
+	FrameTypePing
+	FrameTypePong
 )

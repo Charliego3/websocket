@@ -1,67 +1,95 @@
 package websocket
 
 import (
-	"github.com/charmbracelet/log"
+	"github.com/gorilla/websocket"
+	"log/slog"
+	"net/http"
 	"time"
 )
 
-type Options struct {
-	timeout          time.Duration
-	period           time.Duration
-	ping             IMessage
-	logger           *log.Logger
-	prefix           string
-	onConnected      func(client *Client)
-	hideURL          bool
-	disableReconnect bool
+type Option[T any] func(*T)
+
+func (o Option[T]) apply(t *T) {
+	o(t)
 }
 
-type Option func(opts *Options)
-
-func WithDialTimeout(timeout time.Duration) Option {
-	return func(opts *Options) {
-		opts.timeout = timeout
+func applyOpts[T any](t *T, opts []Option[T]) {
+	for _, opt := range opts {
+		opt.apply(t)
 	}
 }
 
-func WithPingPeriod(period time.Duration) Option {
-	return func(opts *Options) {
-		opts.period = period
+// Client options
+
+// WithLogger custom specify logger instance
+func WithLogger(logger *slog.Logger) Option[Client] {
+	return func(c *Client) {
+		c.logger = logger
 	}
 }
 
-func WithPing(msg IMessage) Option {
-	return func(opts *Options) {
-		opts.ping = msg
+func WithDialer(dialer websocket.Dialer) Option[Client] {
+	return func(c *Client) {
+		c.dialer = &dialer
 	}
 }
 
-func WithLogger(logger *log.Logger) Option {
-	return func(opts *Options) {
-		opts.logger = logger
+func WithRequestHeader(header http.Header) Option[Client] {
+	return func(c *Client) {
+		c.header = header
 	}
 }
 
-func WithOnConnected(f func(*Client)) Option {
-	return func(opts *Options) {
-		opts.onConnected = f
+func WithProxyURL(proxyURL string) Option[Client] {
+	return func(c *Client) {
+		c.proxyURL = proxyURL
 	}
 }
 
-func WithPrefix(prefix string) Option {
-	return func(opts *Options) {
-		opts.prefix = prefix
+func WithCompression(compression bool) Option[Client] {
+	return func(c *Client) {
+		c.compression = compression
 	}
 }
 
-func HiddenURL() Option {
-	return func(opts *Options) {
-		opts.hideURL = true
+func WithAutoReConnect() Option[Client] {
+	return func(c *Client) {
+		c.autoReconnect = true
 	}
 }
 
-func DisableReconnect() Option {
-	return func(opts *Options) {
-		opts.disableReconnect = true
+func WithReadTimeout(timeout time.Duration) Option[Client] {
+	return func(c *Client) {
+		c.readTimeout = timeout
+	}
+}
+
+func WithConnectTimeout(timeout time.Duration) Option[Client] {
+	return func(c *Client) {
+		c.connectTimeout = timeout
+	}
+}
+
+func WithDecompressHandler(handler DecompressHandler) Option[Client] {
+	return func(c *Client) {
+		c.decompress = handler
+	}
+}
+
+func WithErrorHandler(handler ErrorHandler) Option[Client] {
+	return func(c *Client) {
+		c.errHandler = handler
+	}
+}
+
+func WithMessageHandler(handler OnMessageHandler) Option[Client] {
+	return func(c *Client) {
+		c.onMessage = handler
+	}
+}
+
+func WithMessageParser(parser Parser) Option[Client] {
+	return func(c *Client) {
+		c.parser = parser
 	}
 }

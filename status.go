@@ -5,7 +5,6 @@ type Status uint8
 
 const (
 	StatusDisconnected Status = iota
-	StatusWaiting
 	StatusConnecting
 	StatusDisconnecting
 	StatusEstablish // unused
