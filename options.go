@@ -123,3 +123,15 @@ func WithHeartbeatHandler(handler HeartbeatHandler) Option[Client] {
 		c.heartbeat = handler
 	}
 }
+
+func WithConnected(handler OnConnectedHandler) Option[Client] {
+	return func(c *Client) {
+		c.onConnected = handler
+	}
+}
+
+func WithReconnected(handler ReConnectedHandler) Option[Client] {
+	return func(c *Client) {
+		c.onReconnected = handler
+	}
+}
