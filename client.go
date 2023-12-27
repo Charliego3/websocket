@@ -2,6 +2,7 @@ package websocket
 
 import (
 	"context"
+	"encoding/json"
 	"github.com/gorilla/websocket"
 	"github.com/pkg/errors"
 	"log/slog"
@@ -17,32 +18,45 @@ var (
 )
 
 type clientOpts struct {
-	logger        *slog.Logger
-	dialer        *websocket.Dialer
-	proxyURL      string
-	header        http.Header
-	compression   bool
-	autoReconnect bool
+	logger           *slog.Logger
+	dialer           *websocket.Dialer
+	proxyURL         string
+	header           http.Header
+	compression      bool
+	compressionLevel int
+	autoReconnect    bool
+	readLimit        int64
 
-	readTimeout    time.Duration
-	writeTimeout   time.Duration
-	connectTimeout time.Duration
+	readTimeout       time.Duration
+	writeTimeout      time.Duration
+	connectTimeout    time.Duration
+	heartbeatInterval time.Duration
 
 	onConnected   OnConnectedHandler
 	onReconnected ReConnectedHandler
 	decompress    DecompressHandler
+	onClose       OnCloseHandler
+	pingHandler   PingHandler
+	pongHandler   PongHandler
 	errHandler    ErrorHandler
+	heartbeat     HeartbeatHandler
 }
 
 func newOpts() *clientOpts {
 	opts := new(clientOpts)
 	opts.logger = slog.Default()
-	opts.readTimeout = time.Second * 30
+	opts.readTimeout = time.Second * 3
 	opts.writeTimeout = time.Second * 3
 	opts.connectTimeout = time.Second * 30
+	opts.heartbeatInterval = time.Minute
 	opts.onConnected = func(*Client) {}
 	opts.onReconnected = func(*Client) {}
 	return opts
+}
+
+type Message struct {
+	Type FrameType
+	Msg  []byte
 }
 
 type Client struct {
@@ -50,9 +64,10 @@ type Client struct {
 	ctx      context.Context
 	wsURL    string
 	conn     *websocket.Conn
-	status   Status
 	stopC    chan struct{}
+	writeC   chan Message
 	receiver Receiver
+	sdOnce   sync.Once
 }
 
 func NewClient(ctx context.Context, wsURL string, receiver Receiver, opts ...Option[Client]) (*Client, error) {
@@ -78,16 +93,28 @@ func NewClient(ctx context.Context, wsURL string, receiver Receiver, opts ...Opt
 	client.wsURL = wsURL
 	client.errHandler = client.defaultErrorHandler
 	applyOpts[Client](client, opts)
-	client.status = StatusConnecting
 	client.stopC = make(chan struct{})
+	client.writeC = make(chan Message, 10)
 	if err := client.connect(); err != nil {
 		return nil, err
 	}
-	client.status = StatusConnected
-	client.onConnected(client)
 	conns[wsURL] = client
 	client.logger.Info("Websocket connected", slog.String("URL", wsURL))
 	return client, nil
+}
+
+func (c *Client) Shutdown() (err error) {
+	c.sdOnce.Do(func() {
+		mutex.Lock()
+		defer mutex.Unlock()
+		close(c.stopC)
+		delete(conns, c.wsURL)
+		if c.conn != nil {
+			err = c.conn.Close()
+		}
+		c.logger.Info("Websocket stopped.", slog.String("URL", c.wsURL))
+	})
+	return
 }
 
 func (c *Client) connect() (err error) {
@@ -101,69 +128,109 @@ func (c *Client) connect() (err error) {
 		return
 	}
 
+	if err = c.conn.SetCompressionLevel(c.compressionLevel); err != nil {
+		return err
+	}
+
 	go c.readLoop()
+	go c.writeLoop()
+	c.onConnected(c)
 	return
 }
 
 func (c *Client) reconnect() {
-	c.status = StatusReConnecting
 	if err := c.connect(); err != nil {
 		return
 	}
 
-	c.status = StatusConnected
 	c.onReconnected(c)
 }
 
-func (c *Client) setWriteDeadLine() {
-	_ = c.conn.SetWriteDeadline(time.Now().Add(c.writeTimeout))
+func (c *Client) getWriteDeadline() time.Time {
+	return time.Now().Add(c.writeTimeout)
 }
 
-func (c *Client) SendMessage(message []byte) error {
-	c.setWriteDeadLine()
-	return c.conn.WriteMessage(websocket.TextMessage, message)
+func (c *Client) SendMessage(message []byte) {
+	c.writeC <- Message{Type: FrameTypeText, Msg: message}
+}
+
+func (c *Client) SendBinary(message []byte) {
+	c.writeC <- Message{Type: FrameTypeBinary, Msg: message}
 }
 
 func (c *Client) SendJson(message any) error {
-	c.setWriteDeadLine()
-	return c.conn.WriteJSON(message)
+	bs, err := json.Marshal(message)
+	if err != nil {
+		return err
+	}
+	c.writeC <- Message{Type: FrameTypeText, Msg: bs}
+	return nil
 }
 
-func (c *Client) SendPing(message []byte) error {
-	c.setWriteDeadLine()
-	return c.conn.WriteMessage(websocket.PingMessage, message)
+func (c *Client) SendPing(message []byte) {
+	c.writeC <- Message{Type: FrameTypePing, Msg: message}
 }
 
-func (c *Client) SendPong(message []byte) error {
-	c.setWriteDeadLine()
-	return c.conn.WriteMessage(websocket.PongMessage, message)
+func (c *Client) SendPong(message []byte) {
+	c.writeC <- Message{Type: FrameTypePong, Msg: message}
 }
 
-func (c *Client) SendClose(message []byte) error {
-	c.setWriteDeadLine()
-	return c.conn.WriteMessage(websocket.CloseMessage, message)
+func (c *Client) SendClose(message []byte) {
+	c.writeC <- Message{Type: FrameTypeClose, Msg: message}
+}
+
+func (c *Client) writeLoop() {
+	ticker := time.NewTicker(c.heartbeatInterval)
+
+	for {
+		select {
+		case <-c.stopC:
+			_ = c.Shutdown()
+			return
+		case <-c.ctx.Done():
+			_ = c.Shutdown()
+			return
+		case <-ticker.C:
+			if c.heartbeat != nil {
+				c.heartbeat(c)
+			}
+		case msg := <-c.writeC:
+			var err error
+			switch msg.Type {
+			case FrameTypePing, FrameTypePong, FrameTypeClose:
+				err = c.conn.WriteControl(int(msg.Type), msg.Msg, c.getWriteDeadline())
+			case FrameTypeText, FrameTypeBinary:
+				_ = c.conn.SetWriteDeadline(c.getWriteDeadline())
+				err = c.conn.WriteMessage(int(msg.Type), msg.Msg)
+			}
+
+			if err != nil {
+				c.errHandler(msg.Type, errors.Wrap(err, "failed to send message"))
+			}
+		}
+	}
 }
 
 func (c *Client) readLoop() {
-	//c.conn.SetPingHandler(nil)
-	//c.conn.SetPongHandler(func(appData string) error {
-	//	return nil
-	//})
+	c.conn.SetReadLimit(c.readLimit)
+	c.conn.SetCloseHandler(c.onClose)
+	c.conn.SetPingHandler(c.pingHandler)
+	c.conn.SetPongHandler(c.pongHandler)
 
 	readFrame := func() bool {
 		defer func() {
 			if err := recover(); err != nil {
-				c.logger.Error("failed to process received message",
+				c.logger.Error("failed to process",
 					slog.Any("err", err))
 			}
 		}()
 
 		select {
 		case <-c.stopC:
-			c.logger.Info("websocket accept is stopped")
+			_ = c.Shutdown()
 			return true
 		case <-c.ctx.Done():
-			c.logger.Info("received stop command")
+			_ = c.Shutdown()
 			return true
 		default:
 			_ = c.conn.SetReadDeadline(time.Now().Add(c.readTimeout))
@@ -172,7 +239,7 @@ func (c *Client) readLoop() {
 				if c.autoReconnect {
 					c.reconnect()
 				} else {
-					_ = c.conn.Close()
+					_ = c.Shutdown()
 				}
 				return true
 			}

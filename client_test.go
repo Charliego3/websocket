@@ -26,10 +26,15 @@ type FutureResp struct {
 type TestReceiver struct{}
 
 func (r *TestReceiver) Unmarshal(frameType FrameType, reader io.Reader) (any, error) {
+	bytes, err := io.ReadAll(reader)
+	if err != nil {
+		return nil, err
+	}
+	if bytes[0] != '{' {
+		return string(bytes), nil
+	}
 	resp := new(FutureResp)
-	decoder := json.NewDecoder(reader)
-	err := decoder.Decode(resp)
-	return resp, err
+	return resp, json.Unmarshal(bytes, resp)
 }
 
 func (r *TestReceiver) OnMessage(msg any) {
@@ -38,7 +43,12 @@ func (r *TestReceiver) OnMessage(msg any) {
 
 func TestClient(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
-	client, err := NewClient(ctx, "wss://api.bw6.com/websocket", new(TestReceiver))
+	client, err := NewClient(ctx, "wss://api.bw6.com/websocket", new(TestReceiver),
+		WithHeartbeatInterval(time.Second*5),
+		WithHeartbeatHandler(func(c *Client) {
+			c.SendMessage([]byte("ping"))
+		}),
+	)
 	require.NoError(t, err)
 
 	require.NoError(t, client.SendJson(struct {
@@ -46,7 +56,7 @@ func TestClient(t *testing.T) {
 		Channel string `json:"channel,omitempty"`
 	}{"addChannel", "btcusdt_trades"}))
 
-	time.AfterFunc(time.Minute*5, func() {
+	time.AfterFunc(time.Second*10, func() {
 		cancel()
 	})
 	select {}

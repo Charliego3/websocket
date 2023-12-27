@@ -82,14 +82,44 @@ func WithErrorHandler(handler ErrorHandler) Option[Client] {
 	}
 }
 
-func WithMessageHandler(handler OnMessageHandler) Option[Client] {
+func WithCloseHandler(handler OnCloseHandler) Option[Client] {
 	return func(c *Client) {
-		c.onMessage = handler
+		c.onClose = handler
 	}
 }
 
-func WithMessageParser(parser Parser) Option[Client] {
+func WithPingHandler(handler PingHandler) Option[Client] {
 	return func(c *Client) {
-		c.parser = parser
+		c.pingHandler = handler
+	}
+}
+
+func WithPongHandler(handler PongHandler) Option[Client] {
+	return func(c *Client) {
+		c.pongHandler = handler
+	}
+}
+
+func WithCompressionLevel(level int) Option[Client] {
+	return func(c *Client) {
+		c.compressionLevel = level
+	}
+}
+
+func WithReadLimit(limit int64) Option[Client] {
+	return func(c *Client) {
+		c.readLimit = limit
+	}
+}
+
+func WithHeartbeatInterval(interval time.Duration) Option[Client] {
+	return func(c *Client) {
+		c.heartbeatInterval = interval
+	}
+}
+
+func WithHeartbeatHandler(handler HeartbeatHandler) Option[Client] {
+	return func(c *Client) {
+		c.heartbeat = handler
 	}
 }
