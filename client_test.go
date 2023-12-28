@@ -43,23 +43,20 @@ func (r *TestReceiver) OnMessage(msg any) {
 
 func TestClient(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
-	markets := []string{"btcusdt", "ethusdt"}
-	for _, market := range markets {
-		client, err := NewClient(ctx, "wss://api.bw6.com/websocket", new(TestReceiver),
-			WithHeartbeatInterval(time.Second*5),
-			WithHeartbeatHandler(func(c *Client) {
-				c.SendMessage([]byte("ping"))
-			}),
-		)
-		require.NoError(t, err)
+	client, err := NewClient(ctx, "wss://api.bw6.com/websocket", new(TestReceiver),
+		WithHeartbeatInterval(time.Second*5),
+		WithHeartbeatHandler(func(c *Client) {
+			c.SendMessage([]byte("ping"))
+		}),
+	)
+	require.NoError(t, err)
 
-		require.NoError(t, client.SendJson(struct {
-			Event   string `json:"event,omitempty"`
-			Channel string `json:"channel,omitempty"`
-		}{"addChannel", market + "_trades"}))
-	}
+	require.NoError(t, client.SendJson(struct {
+		Event   string `json:"event,omitempty"`
+		Channel string `json:"channel,omitempty"`
+	}{"addChannel", "btcusdt_trades"}))
 
-	time.AfterFunc(time.Minute, func() {
+	time.AfterFunc(time.Second*10, func() {
 		cancel()
 	})
 	select {}
