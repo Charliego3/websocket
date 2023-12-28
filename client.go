@@ -12,11 +12,6 @@ import (
 	"time"
 )
 
-var (
-	mutex sync.Mutex
-	conns = make(map[string]*Client)
-)
-
 type clientOpts struct {
 	logger           *slog.Logger
 	dialer           *websocket.Dialer
@@ -75,17 +70,6 @@ func NewClient(ctx context.Context, wsURL string, receiver Receiver, opts ...Opt
 		return nil, errors.New("can't using nil receiver")
 	}
 
-	if c, ok := conns[wsURL]; ok {
-		return c, nil
-	}
-
-	mutex.Lock()
-	defer mutex.Unlock()
-
-	if c, ok := conns[wsURL]; ok {
-		return c, nil
-	}
-
 	client := new(Client)
 	client.ctx = ctx
 	client.clientOpts = newOpts()
@@ -98,17 +82,13 @@ func NewClient(ctx context.Context, wsURL string, receiver Receiver, opts ...Opt
 	if err := client.connect(); err != nil {
 		return nil, err
 	}
-	conns[wsURL] = client
 	client.logger.Info("Websocket connected", slog.String("URL", wsURL))
 	return client, nil
 }
 
 func (c *Client) Shutdown() (err error) {
 	c.sdOnce.Do(func() {
-		mutex.Lock()
-		defer mutex.Unlock()
 		close(c.stopC)
-		delete(conns, c.wsURL)
 		if c.conn != nil {
 			err = c.conn.Close()
 		}
