@@ -1,7 +1,7 @@
 package websocket
 
-//go:generate stringer -type=Status -trimprefix=Status -output=status_string.go
-type Status uint8
+//go:generate enumer -type Status -text -values -trimprefix Status -output status_string.go
+type Status uint32
 
 const (
 	StatusDisconnected Status = iota

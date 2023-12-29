@@ -3,12 +3,15 @@ package websocket
 import (
 	"context"
 	"encoding/json"
+	stderrs "errors"
 	"github.com/gorilla/websocket"
 	"github.com/pkg/errors"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -68,6 +71,7 @@ type Client struct {
 	writeC   chan Message
 	receiver Receiver
 	sdOnce   sync.Once
+	status   Status
 }
 
 func NewClient(ctx context.Context, wsURL string, receiver Receiver, opts ...Option[Client]) (*Client, error) {
@@ -95,35 +99,57 @@ func NewClient(ctx context.Context, wsURL string, receiver Receiver, opts ...Opt
 	applyOpts[Client](client, opts)
 	client.stopC = make(chan struct{})
 	client.writeC = make(chan Message, 10)
+	client.status = StatusConnecting
 	if err := client.connect(); err != nil {
 		return nil, err
 	}
+	client.status = StatusConnected
+	go client.readLoop()
+	go client.writeLoop()
+	client.onConnected(client)
 	conns[wsURL] = client
 	client.logger.Info("Websocket connected", slog.String("URL", wsURL))
 	return client, nil
+}
+
+func (c *Client) setStatus(status Status) {
+	atomic.StoreUint32((*uint32)(&c.status), uint32(status))
 }
 
 func (c *Client) Shutdown() (err error) {
 	c.sdOnce.Do(func() {
 		mutex.Lock()
 		defer mutex.Unlock()
+		c.setStatus(StatusDisconnecting)
 		close(c.stopC)
 		delete(conns, c.wsURL)
 		if c.conn != nil {
 			err = c.conn.Close()
 		}
+		c.setStatus(StatusDisconnected)
 		c.logger.Info("Websocket stopped.", slog.String("URL", c.wsURL))
 	})
 	return
 }
 
 func (c *Client) connect() (err error) {
-	dialer, err := c.getDialer()
-	if err != nil {
-		return err
+	if c.dialer == nil {
+		c.dialer = &websocket.Dialer{
+			Proxy:             http.ProxyFromEnvironment,
+			HandshakeTimeout:  c.connectTimeout,
+			EnableCompression: c.compression,
+		}
+
+		if c.proxyURL != "" {
+			proxy, err := url.Parse(c.proxyURL)
+			if err != nil {
+				return err
+			}
+			c.dialer.Proxy = http.ProxyURL(proxy)
+		}
 	}
 
-	c.conn, _, err = dialer.Dial(c.wsURL, c.header)
+	c.conn, _, err = c.dialer.Dial(c.wsURL, c.header)
 	if err != nil {
 		return
 	}
@@ -131,19 +157,18 @@ func (c *Client) connect() (err error) {
 	if err = c.conn.SetCompressionLevel(c.compressionLevel); err != nil {
 		return err
 	}
-
-	go c.readLoop()
-	go c.writeLoop()
-	c.onConnected(c)
 	return
 }
 
 func (c *Client) reconnect() {
+	c.logger.Info("Websocket reconnecting", slog.String("wsURL", c.wsURL))
+	c.setStatus(StatusReConnecting)
 	if err := c.connect(); err != nil {
 		return
 	}
-
+	c.setStatus(StatusConnected)
 	c.onReconnected(c)
+	c.logger.Info("Websocket reconnected", slog.String("wsURL", c.wsURL))
 }
 
 func (c *Client) getWriteDeadline() time.Time {
@@ -183,6 +208,13 @@ func (c *Client) writeLoop() {
 	ticker := time.NewTicker(c.heartbeatInterval)
 
 	for {
+		status := Status(atomic.LoadUint32((*uint32)(&c.status)))
+		if status == StatusConnecting || status == StatusReConnecting {
+			c.logger.Debug("Websocket reconnecting stop write", slog.String("wsURL", c.wsURL))
+			time.Sleep(time.Millisecond * 500)
+			continue
+		}
+
 		select {
 		case <-c.stopC:
 			_ = c.Shutdown()
@@ -201,11 +233,17 @@ func (c *Client) writeLoop() {
 				err = c.conn.WriteControl(int(msg.Type), msg.Msg, c.getWriteDeadline())
 			case FrameTypeText, FrameTypeBinary:
 				_ = c.conn.SetWriteDeadline(c.getWriteDeadline())
+				c.logger.Debug("Websocket send", slog.String("message", string(msg.Msg)))
 				err = c.conn.WriteMessage(int(msg.Type), msg.Msg)
 			}
 
 			if err != nil {
-				c.errHandler(msg.Type, errors.Wrap(err, "failed to send message"))
+				var ope *net.OpError
+				if stderrs.As(err, &ope) {
+					c.reconnect()
+					continue
+				}
+				c.errHandler(msg.Type, errors.Wrap(err, "Websocket failed send message"))
 			}
 		}
 	}
@@ -213,14 +251,20 @@ func (c *Client) writeLoop() {
 
 func (c *Client) readLoop() {
 	c.conn.SetReadLimit(c.readLimit)
-	c.conn.SetCloseHandler(c.onClose)
-	c.conn.SetPingHandler(c.pingHandler)
-	c.conn.SetPongHandler(c.pongHandler)
+	if c.onClose != nil {
+		c.conn.SetCloseHandler(c.onClose)
+	}
+	if c.pingHandler != nil {
+		c.conn.SetPingHandler(c.pingHandler)
+	}
+	if c.pongHandler != nil {
+		c.conn.SetPongHandler(c.pongHandler)
+	}
 
 	readFrame := func() bool {
 		defer func() {
 			if err := recover(); err != nil {
-				c.logger.Error("failed to process",
+				c.logger.Error("Websocket failed read message",
 					slog.Any("err", err))
 			}
 		}()
@@ -236,12 +280,18 @@ func (c *Client) readLoop() {
 			_ = c.conn.SetReadDeadline(time.Now().Add(c.readTimeout))
 			ft, reader, err := c.conn.NextReader()
 			if err != nil {
+				status := Status(atomic.LoadUint32((*uint32)(&c.status)))
+				if status == StatusDisconnecting || status == StatusDisconnected {
+					return true
+				}
 				if c.autoReconnect {
 					c.reconnect()
+					return false
 				} else {
+					c.logger.Error("Websocket read message error", slog.String("wsURL", c.wsURL), slog.Any("err", err))
 					_ = c.Shutdown()
+					return true
 				}
-				return true
 			}
 
 			frameType := FrameType(ft)
@@ -251,14 +301,14 @@ func (c *Client) readLoop() {
 
 			if frameType == FrameTypeBinary && c.decompress != nil {
 				if reader, err = c.decompress(reader); err != nil {
-					c.errHandler(frameType, errors.Wrap(err, "failed to decompress frame"))
+					c.errHandler(frameType, errors.Wrap(err, "Websocket failed decompress frame"))
 					return false
 				}
 			}
 
 			frame, per := c.receiver.Unmarshal(frameType, reader)
 			if per != nil {
-				c.errHandler(frameType, errors.Wrap(per, "failed to parse frame"))
+				c.errHandler(frameType, errors.Wrap(per, "Websocket failed parse frame"))
 				return false
 			}
 			c.receiver.OnMessage(frame)
@@ -274,29 +324,9 @@ func (c *Client) readLoop() {
 }
 
 func (c *Client) defaultErrorHandler(frameType FrameType, err error) {
-	c.logger.Error("websocket got an error",
+	c.logger.Error("Websocket got an error",
 		slog.String("URL", c.wsURL),
 		slog.String("frameType", frameType.String()),
 		slog.Any("err", err),
 	)
-}
-
-func (o *clientOpts) getDialer() (*websocket.Dialer, error) {
-	if o.dialer == nil {
-		o.dialer = &websocket.Dialer{
-			Proxy:             http.ProxyFromEnvironment,
-			HandshakeTimeout:  o.connectTimeout,
-			EnableCompression: o.compression,
-		}
-
-		if o.proxyURL != "" {
-			proxy, err := url.Parse(o.proxyURL)
-			if err != nil {
-				return nil, err
-			}
-			o.dialer.Proxy = http.ProxyURL(proxy)
-		}
-	}
-
-	return o.dialer, nil
 }
