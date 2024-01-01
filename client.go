@@ -239,6 +239,7 @@ func (c *Client) writeLoop() {
 
 			if err != nil {
 				var ope *net.OpError
+				c.logger.Error("Websocket failed send message", slog.String("wsURL", c.wsURL), slog.Any("err", err))
 				if stderrs.As(err, &ope) {
 					c.reconnect()
 					continue
@@ -280,6 +281,7 @@ func (c *Client) readLoop() {
 			_ = c.conn.SetReadDeadline(time.Now().Add(c.readTimeout))
 			ft, reader, err := c.conn.NextReader()
 			if err != nil {
+				c.logger.Error("Websocket read message error", slog.String("wsURL", c.wsURL), slog.Any("err", err))
 				status := Status(atomic.LoadUint32((*uint32)(&c.status)))
 				if status == StatusDisconnecting || status == StatusDisconnected {
 					return true
@@ -288,7 +290,6 @@ func (c *Client) readLoop() {
 					c.reconnect()
 					return false
 				} else {
-					c.logger.Error("Websocket read message error", slog.String("wsURL", c.wsURL), slog.Any("err", err))
 					_ = c.Shutdown()
 					return true
 				}
