@@ -287,7 +287,8 @@ func (c *Client) readLoop() {
 				} else if status == StatusReConnecting {
 					return false
 				}
-				c.logger.Error("Websocket read message error", slog.String("wsURL", c.wsURL), slog.Any("err", err))
+				c.logger.Error("Websocket read message error", slog.String("wsURL", c.wsURL),
+					slog.String("status", status.String()), slog.Any("err", err))
 				if c.autoReconnect {
 					c.reconnect()
 					return false
