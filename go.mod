@@ -1,4 +1,4 @@
-module github.com/charliego93/websocket
+module github.com/charliego3/websocket
 
 go 1.19
 
