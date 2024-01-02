@@ -281,11 +281,13 @@ func (c *Client) readLoop() {
 			_ = c.conn.SetReadDeadline(time.Now().Add(c.readTimeout))
 			ft, reader, err := c.conn.NextReader()
 			if err != nil {
-				c.logger.Error("Websocket read message error", slog.String("wsURL", c.wsURL), slog.Any("err", err))
 				status := Status(atomic.LoadUint32((*uint32)(&c.status)))
 				if status == StatusDisconnecting || status == StatusDisconnected {
 					return true
+				} else if status == StatusReConnecting {
+					return false
 				}
+				c.logger.Error("Websocket read message error", slog.String("wsURL", c.wsURL), slog.Any("err", err))
 				if c.autoReconnect {
 					c.reconnect()
 					return false
