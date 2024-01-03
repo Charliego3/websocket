@@ -278,6 +278,9 @@ func (c *Client) readLoop() {
 			_ = c.Shutdown()
 			return true
 		default:
+			if c.conn == nil {
+				return false
+			}
 			_ = c.conn.SetReadDeadline(time.Now().Add(c.readTimeout))
 			ft, reader, err := c.conn.NextReader()
 			if err != nil {
