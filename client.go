@@ -157,14 +157,30 @@ func (c *Client) connect() (err error) {
 	if err = c.conn.SetCompressionLevel(c.compressionLevel); err != nil {
 		return err
 	}
+	c.conn.SetReadLimit(c.readLimit)
+	if c.onClose != nil {
+		c.conn.SetCloseHandler(c.onClose)
+	}
+	if c.pingHandler != nil {
+		c.conn.SetPingHandler(c.pingHandler)
+	}
+	if c.pongHandler != nil {
+		c.conn.SetPongHandler(c.pongHandler)
+	}
 	return
 }
 
 func (c *Client) reconnect() {
 	c.logger.Info("Websocket reconnecting", slog.String("wsURL", c.wsURL))
 	c.setStatus(StatusReConnecting)
-	if err := c.connect(); err != nil {
-		return
+	for {
+		if err := c.connect(); err != nil {
+			c.logger.Error("Websocket reconnect failed", slog.String("wsURL", c.wsURL), slog.Any("err", err))
+			time.Sleep(time.Millisecond * 500)
+			continue
+		} else {
+			break
+		}
 	}
 	c.setStatus(StatusConnected)
 	c.onReconnected(c)
@@ -251,17 +267,6 @@ func (c *Client) writeLoop() {
 }
 
 func (c *Client) readLoop() {
-	c.conn.SetReadLimit(c.readLimit)
-	if c.onClose != nil {
-		c.conn.SetCloseHandler(c.onClose)
-	}
-	if c.pingHandler != nil {
-		c.conn.SetPingHandler(c.pingHandler)
-	}
-	if c.pongHandler != nil {
-		c.conn.SetPongHandler(c.pongHandler)
-	}
-
 	readFrame := func() bool {
 		defer func() {
 			if err := recover(); err != nil {
@@ -279,7 +284,7 @@ func (c *Client) readLoop() {
 			return true
 		default:
 			if c.conn == nil {
-				time.Sleep(time.Second)
+				time.Sleep(time.Millisecond * 500)
 				return false
 			}
 			_ = c.conn.SetReadDeadline(time.Now().Add(c.readTimeout))
