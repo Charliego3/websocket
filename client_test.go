@@ -44,7 +44,8 @@ func (r *TestReceiver) OnMessage(msg any) {
 func TestClient(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	client, err := NewClient(ctx, "wss://api.bw6.com/websocket", new(TestReceiver),
-		WithHeartbeatInterval(time.Second*5),
+		WithHeartbeatInterval(time.Second),
+		WithAutoReConnect(),
 		WithHeartbeatHandler(func(c *Client) {
 			c.SendMessage([]byte("ping"))
 		}),
@@ -56,8 +57,9 @@ func TestClient(t *testing.T) {
 		Channel string `json:"channel,omitempty"`
 	}{"addChannel", "btcusdt_trades"}))
 
-	time.AfterFunc(time.Second*10, func() {
-		cancel()
-	})
+	//time.AfterFunc(time.Second*10, func() {
+	//	cancel()
+	//})
+	_ = cancel
 	select {}
 }

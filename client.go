@@ -116,6 +116,10 @@ func (c *Client) setStatus(status Status) {
 	atomic.StoreUint32((*uint32)(&c.status), uint32(status))
 }
 
+func (c *Client) Status() Status {
+	return Status(atomic.LoadUint32((*uint32)(&c.status)))
+}
+
 func (c *Client) Shutdown() (err error) {
 	c.sdOnce.Do(func() {
 		mutex.Lock()
@@ -224,7 +228,7 @@ func (c *Client) writeLoop() {
 	ticker := time.NewTicker(c.heartbeatInterval)
 
 	for {
-		status := Status(atomic.LoadUint32((*uint32)(&c.status)))
+		status := c.Status()
 		if status == StatusConnecting || status == StatusReConnecting {
 			c.logger.Debug("Websocket reconnecting stop write", slog.String("wsURL", c.wsURL))
 			time.Sleep(time.Millisecond * 500)
@@ -258,7 +262,7 @@ func (c *Client) writeLoop() {
 				c.logger.Error("Websocket failed send message", slog.String("wsURL", c.wsURL), slog.Any("err", err))
 				if stderrs.As(err, &ope) {
 					c.reconnect()
-					continue
+					break
 				}
 				c.errHandler(msg.Type, errors.Wrap(err, "Websocket failed send message"))
 			}
@@ -271,7 +275,7 @@ func (c *Client) readLoop() {
 		defer func() {
 			if err := recover(); err != nil {
 				c.logger.Error("Websocket failed read message",
-					slog.Any("err", err))
+					slog.String("wsURL", c.wsURL), slog.Any("err", err))
 			}
 		}()
 
@@ -290,7 +294,7 @@ func (c *Client) readLoop() {
 			_ = c.conn.SetReadDeadline(time.Now().Add(c.readTimeout))
 			ft, reader, err := c.conn.NextReader()
 			if err != nil {
-				status := Status(atomic.LoadUint32((*uint32)(&c.status)))
+				status := c.Status()
 				if status == StatusDisconnecting || status == StatusDisconnected {
 					return true
 				} else if status == StatusReConnecting {
