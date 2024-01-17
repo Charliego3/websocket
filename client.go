@@ -3,11 +3,9 @@ package websocket
 import (
 	"context"
 	"encoding/json"
-	stderrs "errors"
 	"github.com/gorilla/websocket"
 	"github.com/pkg/errors"
 	"log/slog"
-	"net"
 	"net/http"
 	"net/url"
 	"sync"
@@ -21,7 +19,7 @@ var (
 )
 
 type clientOpts struct {
-	logger           *slog.Logger
+	logger           Logger
 	dialer           *websocket.Dialer
 	proxyURL         string
 	header           http.Header
@@ -35,14 +33,15 @@ type clientOpts struct {
 	connectTimeout    time.Duration
 	heartbeatInterval time.Duration
 
-	onConnected   OnConnectedHandler
-	onReconnected ReConnectedHandler
-	decompress    DecompressHandler
-	onClose       OnCloseHandler
-	pingHandler   PingHandler
-	pongHandler   PongHandler
-	errHandler    ErrorHandler
-	heartbeat     HeartbeatHandler
+	onConnected     OnConnectedHandler
+	onReconnected   ReConnectedHandler
+	decompress      DecompressHandler
+	onClose         OnCloseHandler
+	pingHandler     PingHandler
+	pongHandler     PongHandler
+	errHandler      ErrorHandler
+	heartbeat       HeartbeatHandler
+	beforeReconnect BeforeReconnectHandler
 }
 
 func newOpts() *clientOpts {
@@ -54,6 +53,7 @@ func newOpts() *clientOpts {
 	opts.heartbeatInterval = time.Minute
 	opts.onConnected = func(*Client) {}
 	opts.onReconnected = func(*Client) {}
+	opts.beforeReconnect = func(*Client) {}
 	return opts
 }
 
@@ -74,19 +74,21 @@ type Client struct {
 	status   Status
 }
 
-func NewClient(ctx context.Context, wsURL string, receiver Receiver, opts ...Option[Client]) (*Client, error) {
+func (c *Client) URL() string {
+	return c.wsURL
+}
+
+func NewClient(ctx context.Context, URL string, receiver Receiver, opts ...Option[Client]) (*Client, error) {
+	if c, ok := conns[URL]; ok {
+		return c, nil
+	}
 	if receiver == nil {
 		return nil, errors.New("can't using nil receiver")
 	}
-
-	if c, ok := conns[wsURL]; ok {
-		return c, nil
-	}
-
 	mutex.Lock()
 	defer mutex.Unlock()
 
-	if c, ok := conns[wsURL]; ok {
+	if c, ok := conns[URL]; ok {
 		return c, nil
 	}
 
@@ -94,21 +96,18 @@ func NewClient(ctx context.Context, wsURL string, receiver Receiver, opts ...Opt
 	client.ctx = ctx
 	client.clientOpts = newOpts()
 	client.receiver = receiver
-	client.wsURL = wsURL
+	client.wsURL = URL
 	client.errHandler = client.defaultErrorHandler
 	applyOpts[Client](client, opts)
-	client.stopC = make(chan struct{})
 	client.writeC = make(chan Message, 10)
 	client.status = StatusConnecting
 	if err := client.connect(); err != nil {
 		return nil, err
 	}
 	client.status = StatusConnected
-	go client.readLoop()
-	go client.writeLoop()
 	client.onConnected(client)
-	conns[wsURL] = client
-	client.logger.Info("Websocket connected", slog.String("URL", wsURL))
+	conns[URL] = client
+	client.logger.Info("Websocket connected", slog.String("URL", URL))
 	return client, nil
 }
 
@@ -171,15 +170,21 @@ func (c *Client) connect() (err error) {
 	if c.pongHandler != nil {
 		c.conn.SetPongHandler(c.pongHandler)
 	}
+
+	c.stopC = make(chan struct{})
+	go c.readLoop()
+	go c.writeLoop()
 	return
 }
 
 func (c *Client) reconnect() {
-	c.logger.Info("Websocket reconnecting", slog.String("wsURL", c.wsURL))
+	c.logger.Info("Websocket reconnecting", slog.String("URL", c.wsURL))
+	c.beforeReconnect(c)
 	c.setStatus(StatusReConnecting)
+	close(c.stopC)
 	for {
 		if err := c.connect(); err != nil {
-			c.logger.Error("Websocket reconnect failed", slog.String("wsURL", c.wsURL), slog.Any("err", err))
+			c.errHandler(FrameTypeNoFrame, EventReconnect, err)
 			time.Sleep(time.Millisecond * 500)
 			continue
 		} else {
@@ -188,7 +193,7 @@ func (c *Client) reconnect() {
 	}
 	c.setStatus(StatusConnected)
 	c.onReconnected(c)
-	c.logger.Info("Websocket reconnected", slog.String("wsURL", c.wsURL))
+	c.logger.Info("Websocket reconnected", slog.String("URL", c.wsURL))
 }
 
 func (c *Client) getWriteDeadline() time.Time {
@@ -226,18 +231,11 @@ func (c *Client) SendClose(message []byte) {
 
 func (c *Client) writeLoop() {
 	ticker := time.NewTicker(c.heartbeatInterval)
+	defer ticker.Stop()
 
 	for {
-		status := c.Status()
-		if status == StatusConnecting || status == StatusReConnecting {
-			c.logger.Debug("Websocket reconnecting stop write", slog.String("wsURL", c.wsURL))
-			time.Sleep(time.Millisecond * 500)
-			continue
-		}
-
 		select {
 		case <-c.stopC:
-			_ = c.Shutdown()
 			return
 		case <-c.ctx.Done():
 			_ = c.Shutdown()
@@ -253,18 +251,20 @@ func (c *Client) writeLoop() {
 				err = c.conn.WriteControl(int(msg.Type), msg.Msg, c.getWriteDeadline())
 			case FrameTypeText, FrameTypeBinary:
 				_ = c.conn.SetWriteDeadline(c.getWriteDeadline())
-				c.logger.Debug("Websocket send", slog.String("message", string(msg.Msg)))
 				err = c.conn.WriteMessage(int(msg.Type), msg.Msg)
+			default:
+				err = errors.New("cannot send no frame message")
 			}
 
 			if err != nil {
-				var ope *net.OpError
-				c.logger.Error("Websocket failed send message", slog.String("wsURL", c.wsURL), slog.Any("err", err))
-				if stderrs.As(err, &ope) {
-					c.reconnect()
-					break
-				}
-				c.errHandler(msg.Type, errors.Wrap(err, "Websocket failed send message"))
+				c.errHandler(msg.Type, EventWrite, err)
+				break
+			}
+
+			if l, ok := c.logger.(interface {
+				Debug(string, ...any)
+			}); ok {
+				l.Debug("Websocket send", slog.String("message", string(msg.Msg)))
 			}
 		}
 	}
@@ -272,60 +272,43 @@ func (c *Client) writeLoop() {
 
 func (c *Client) readLoop() {
 	readFrame := func() bool {
+		frameType := FrameTypeNoFrame
 		defer func() {
 			if err := recover(); err != nil {
-				c.logger.Error("Websocket failed read message",
-					slog.String("wsURL", c.wsURL), slog.Any("err", err))
+				c.errHandler(frameType, EventRead, errors.Errorf("%v", err))
 			}
 		}()
 
 		select {
 		case <-c.stopC:
-			_ = c.Shutdown()
 			return true
 		case <-c.ctx.Done():
 			_ = c.Shutdown()
 			return true
 		default:
-			if c.conn == nil {
-				time.Sleep(time.Millisecond * 500)
-				return false
-			}
 			_ = c.conn.SetReadDeadline(time.Now().Add(c.readTimeout))
 			ft, reader, err := c.conn.NextReader()
+			frameType = FrameType(ft)
 			if err != nil {
-				status := c.Status()
-				if status == StatusDisconnecting || status == StatusDisconnected {
-					return true
-				} else if status == StatusReConnecting {
-					return false
-				}
-				c.logger.Error("Websocket read message error", slog.String("wsURL", c.wsURL),
-					slog.String("status", status.String()), slog.Any("err", err))
+				c.errHandler(frameType, EventRead, err)
 				if c.autoReconnect {
-					c.reconnect()
-					return false
+					go c.reconnect()
 				} else {
 					_ = c.Shutdown()
-					return true
 				}
-			}
-
-			frameType := FrameType(ft)
-			if frameType != FrameTypeText && frameType != FrameTypeBinary {
-				return false
+				return true
 			}
 
 			if frameType == FrameTypeBinary && c.decompress != nil {
 				if reader, err = c.decompress(reader); err != nil {
-					c.errHandler(frameType, errors.Wrap(err, "Websocket failed decompress frame"))
+					c.errHandler(frameType, EventDecompress, err)
 					return false
 				}
 			}
 
-			frame, per := c.receiver.Unmarshal(frameType, reader)
-			if per != nil {
-				c.errHandler(frameType, errors.Wrap(per, "Websocket failed parse frame"))
+			frame, err := c.receiver.Unmarshal(frameType, reader)
+			if err != nil {
+				c.errHandler(frameType, EventUnmarshal, err)
 				return false
 			}
 			c.receiver.OnMessage(frame)
@@ -340,10 +323,11 @@ func (c *Client) readLoop() {
 	}
 }
 
-func (c *Client) defaultErrorHandler(frameType FrameType, err error) {
+func (c *Client) defaultErrorHandler(frameType FrameType, event Event, err error) {
 	c.logger.Error("Websocket got an error",
 		slog.String("URL", c.wsURL),
 		slog.String("frameType", frameType.String()),
+		slog.String("event", event.String()),
 		slog.Any("err", err),
 	)
 }

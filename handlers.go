@@ -14,11 +14,32 @@ type PingHandler func(appData string) error
 
 type PongHandler func(appData string) error
 
-type ErrorHandler func(FrameType, error)
+type ErrorHandler func(FrameType, Event, error)
 
 type HeartbeatHandler func(*Client)
 
-type Receiver interface {
+type BeforeReconnectHandler func(*Client)
+
+type Unmarshaler interface {
 	Unmarshal(frameType FrameType, reader io.Reader) (any, error)
+}
+
+type Receiver interface {
+	Unmarshaler
 	OnMessage(any)
+}
+
+type ReaderReceiver struct{}
+
+func (r *ReaderReceiver) Unmarshal(_ FrameType, reader io.Reader) (any, error) {
+	return reader, nil
+}
+
+func NewReaderReceiver() *ReaderReceiver {
+	return new(ReaderReceiver)
+}
+
+type Logger interface {
+	Info(string, ...any)
+	Error(string, ...any)
 }

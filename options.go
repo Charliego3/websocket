@@ -135,3 +135,9 @@ func WithReconnected(handler ReConnectedHandler) Option[Client] {
 		c.onReconnected = handler
 	}
 }
+
+func WithBeforeReconnect(handler BeforeReconnectHandler) Option[Client] {
+	return func(c *Client) {
+		c.beforeReconnect = handler
+	}
+}
