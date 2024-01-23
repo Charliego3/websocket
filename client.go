@@ -72,6 +72,7 @@ type Client struct {
 	receiver Receiver
 	sdOnce   sync.Once
 	status   Status
+	mutex    sync.Mutex
 }
 
 func (c *Client) URL() string {
@@ -121,8 +122,8 @@ func (c *Client) Status() Status {
 
 func (c *Client) Shutdown() (err error) {
 	c.sdOnce.Do(func() {
-		mutex.Lock()
-		defer mutex.Unlock()
+		c.mutex.Lock()
+		defer c.mutex.Unlock()
 		c.setStatus(StatusDisconnecting)
 		close(c.stopC)
 		delete(conns, c.wsURL)
@@ -178,6 +179,13 @@ func (c *Client) connect() (err error) {
 }
 
 func (c *Client) reconnect() {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	status := c.Status()
+	if status == StatusDisconnecting || status == StatusDisconnected {
+		return
+	}
+
 	c.logger.Info("Websocket reconnecting", slog.String("URL", c.wsURL))
 	c.beforeReconnect(c)
 	c.setStatus(StatusReConnecting)
