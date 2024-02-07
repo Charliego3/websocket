@@ -34,7 +34,7 @@ func WithDialer(dialer websocket.Dialer) Option[Client] {
 	}
 }
 
-func WithRequestHeader(header http.Header) Option[Client] {
+func WithConnectHeader(header http.Header) Option[Client] {
 	return func(c *Client) {
 		c.header = header
 	}
@@ -139,5 +139,11 @@ func WithReconnected(handler ReConnectedHandler) Option[Client] {
 func WithBeforeReconnect(handler BeforeReconnectHandler) Option[Client] {
 	return func(c *Client) {
 		c.beforeReconnect = handler
+	}
+}
+
+func WithDelayReconnect(delay time.Duration) Option[Client] {
+	return func(c *Client) {
+		c.delayReconnect = delay
 	}
 }

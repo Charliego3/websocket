@@ -8,11 +8,11 @@ import (
 	"strings"
 )
 
-const _EventName = "NormalReadWriteDecompress"
+const _EventName = "NormalReadWriteDecompressUnmarshalReconnect"
 
-var _EventIndex = [...]uint8{0, 6, 10, 15, 25}
+var _EventIndex = [...]uint8{0, 6, 10, 15, 25, 34, 43}
 
-const _EventLowerName = "normalreadwritedecompress"
+const _EventLowerName = "normalreadwritedecompressunmarshalreconnect"
 
 func (i Event) String() string {
 	if i >= Event(len(_EventIndex)-1) {
@@ -33,9 +33,11 @@ func _EventNoOp() {
 	_ = x[EventRead-(1)]
 	_ = x[EventWrite-(2)]
 	_ = x[EventDecompress-(3)]
+	_ = x[EventUnmarshal-(4)]
+	_ = x[EventReconnect-(5)]
 }
 
-var _EventValues = []Event{EventNormal, EventRead, EventWrite, EventDecompress}
+var _EventValues = []Event{EventNormal, EventRead, EventWrite, EventDecompress, EventUnmarshal, EventReconnect}
 
 var _EventNameToValueMap = map[string]Event{
 	_EventName[0:6]:        EventNormal,
@@ -46,6 +48,10 @@ var _EventNameToValueMap = map[string]Event{
 	_EventLowerName[10:15]: EventWrite,
 	_EventName[15:25]:      EventDecompress,
 	_EventLowerName[15:25]: EventDecompress,
+	_EventName[25:34]:      EventUnmarshal,
+	_EventLowerName[25:34]: EventUnmarshal,
+	_EventName[34:43]:      EventReconnect,
+	_EventLowerName[34:43]: EventReconnect,
 }
 
 var _EventNames = []string{
@@ -53,6 +59,8 @@ var _EventNames = []string{
 	_EventName[6:10],
 	_EventName[10:15],
 	_EventName[15:25],
+	_EventName[25:34],
+	_EventName[34:43],
 }
 
 // EventString retrieves an enum value from the enum constants string name.

@@ -4,10 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/stretchr/testify/require"
 	"io"
+	"net/http"
 	"testing"
 	"time"
+
+	"github.com/gorilla/websocket"
+	"github.com/stretchr/testify/require"
 )
 
 type FutureResp struct {
@@ -61,5 +64,74 @@ func TestClient(t *testing.T) {
 	//	cancel()
 	//})
 	_ = cancel
+	select {}
+}
+
+func TestMockServer(t *testing.T) {
+	http.HandleFunc("/ws", serveWS)
+	time.AfterFunc(time.Second, func() {
+		fmt.Println("ws served")
+	})
+	http.ListenAndServe(":9999", nil)
+}
+
+var upgrader = websocket.Upgrader{
+	ReadBufferSize:  1024,
+	WriteBufferSize: 1024,
+}
+
+func serveWS(w http.ResponseWriter, r *http.Request) {
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		panic(err)
+	}
+
+	defer conn.Close()
+	for {
+		mt, message, err := conn.ReadMessage()
+		if err != nil {
+			fmt.Println("read:", err)
+			break
+		}
+		fmt.Printf("recv: %s\n", message)
+		err = conn.WriteMessage(mt, message)
+		if err != nil {
+			fmt.Println("write:", err)
+			break
+		}
+	}
+}
+
+type ReconnectReceiver struct {
+	ReaderReceiver
+}
+
+func (ReconnectReceiver) OnMessage(v any) {
+	b, err := io.ReadAll(v.(io.Reader))
+	if err != nil {
+		fmt.Println("receive:", err)
+		return
+	}
+
+	fmt.Println("rece:", string(b))
+}
+
+func TestReconnect(t *testing.T) {
+	NewClient(
+		context.Background(),
+		"ws://127.0.0.1:9999/ws",
+		new(ReconnectReceiver),
+		WithAutoReConnect(),
+		WithHeartbeatInterval(time.Second),
+		WithHeartbeatHandler(func(c *Client) {
+			c.SendMessage([]byte("ping"))
+		}),
+		WithConnected(func(c *Client) {
+			c.SendMessage([]byte("first connected"))
+		}),
+		WithReconnected(func(c *Client) {
+			c.SendMessage([]byte("after reconnected"))
+		}),
+	)
 	select {}
 }

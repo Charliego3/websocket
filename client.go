@@ -32,6 +32,7 @@ type clientOpts struct {
 	writeTimeout      time.Duration
 	connectTimeout    time.Duration
 	heartbeatInterval time.Duration
+	delayReconnect    time.Duration
 
 	onConnected     OnConnectedHandler
 	onReconnected   ReConnectedHandler
@@ -50,6 +51,7 @@ func newOpts() *clientOpts {
 	opts.readTimeout = time.Second * 3
 	opts.writeTimeout = time.Second * 3
 	opts.connectTimeout = time.Second * 30
+	opts.delayReconnect = time.Second
 	opts.heartbeatInterval = time.Minute
 	opts.onConnected = func(*Client) {}
 	opts.onReconnected = func(*Client) {}
@@ -186,14 +188,16 @@ func (c *Client) reconnect() {
 		return
 	}
 
+	close(c.stopC)
+	_ = c.conn.Close()
+
 	c.logger.Info("Websocket reconnecting", slog.String("URL", c.wsURL))
 	c.beforeReconnect(c)
 	c.setStatus(StatusReConnecting)
-	close(c.stopC)
 	for {
 		if err := c.connect(); err != nil {
 			c.errHandler(FrameTypeNoFrame, EventReconnect, err)
-			time.Sleep(time.Millisecond * 500)
+			time.Sleep(c.delayReconnect)
 			continue
 		} else {
 			break

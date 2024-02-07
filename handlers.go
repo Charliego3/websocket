@@ -31,12 +31,8 @@ type Receiver interface {
 
 type ReaderReceiver struct{}
 
-func (r *ReaderReceiver) Unmarshal(_ FrameType, reader io.Reader) (any, error) {
+func (ReaderReceiver) Unmarshal(_ FrameType, reader io.Reader) (any, error) {
 	return reader, nil
-}
-
-func NewReaderReceiver() *ReaderReceiver {
-	return new(ReaderReceiver)
 }
 
 type Logger interface {
