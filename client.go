@@ -3,19 +3,15 @@ package websocket
 import (
 	"context"
 	"encoding/json"
-	"github.com/gorilla/websocket"
-	"github.com/pkg/errors"
 	"log/slog"
 	"net/http"
 	"net/url"
 	"sync"
 	"sync/atomic"
 	"time"
-)
 
-var (
-	mutex sync.Mutex
-	conns = make(map[string]*Client)
+	"github.com/gorilla/websocket"
+	"github.com/pkg/errors"
 )
 
 type clientOpts struct {
@@ -82,17 +78,8 @@ func (c *Client) URL() string {
 }
 
 func NewClient(ctx context.Context, URL string, receiver Receiver, opts ...Option[Client]) (*Client, error) {
-	if c, ok := conns[URL]; ok {
-		return c, nil
-	}
 	if receiver == nil {
 		return nil, errors.New("can't using nil receiver")
-	}
-	mutex.Lock()
-	defer mutex.Unlock()
-
-	if c, ok := conns[URL]; ok {
-		return c, nil
 	}
 
 	client := new(Client)
@@ -109,7 +96,6 @@ func NewClient(ctx context.Context, URL string, receiver Receiver, opts ...Optio
 	}
 	client.status = StatusConnected
 	client.onConnected(client)
-	conns[URL] = client
 	client.logger.Info("Websocket connected", slog.String("URL", URL))
 	return client, nil
 }
@@ -128,7 +114,6 @@ func (c *Client) Shutdown() (err error) {
 		defer c.mutex.Unlock()
 		c.setStatus(StatusDisconnecting)
 		close(c.stopC)
-		delete(conns, c.wsURL)
 		if c.conn != nil {
 			err = c.conn.Close()
 		}

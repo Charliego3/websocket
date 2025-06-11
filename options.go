@@ -1,10 +1,11 @@
 package websocket
 
 import (
-	"github.com/gorilla/websocket"
 	"log/slog"
 	"net/http"
 	"time"
+
+	"github.com/gorilla/websocket"
 )
 
 type Option[T any] func(*T)
